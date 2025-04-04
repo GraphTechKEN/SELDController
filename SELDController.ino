@@ -65,6 +65,7 @@
 //V4.2.1.2 BveEX起動時、B0位置で直通ランプが点灯しない不具合修正
 //V4.2.1.3 BveEX起動時、直通帯でBCが動かない不具合修正
 //V4.2.1.4 JRETS185系に仮対応
+//V4.2.1.5 マスコンEBに対応
 
 /*set_InputFlip
   1bit:警報持続
@@ -213,6 +214,7 @@ uint16_t set_MCNotchNumConsole = 5;  //070マスコンノッチ最大数
 uint16_t set_MCNotchNumBVE = 5;      //072マスコンノッチ数(車両)
 uint16_t Auto_Notch_Adjust = 1;      //078自動ノッチ合わせ機構
 bool EB_latch = false;
+bool deadman = false;
 
 
 void setup() {
@@ -535,6 +537,9 @@ void read_MC(void) {
   static uint8_t mcBit_latch = 0;  //MCP23S17読込格納
   if (mcBit != mcBit_latch) {
     if (ioexp_1_AB >> PIN_MC_DEC & 1) {
+      if (set_InputFlip >> 6 & 1 && deadman) {  //非常有効時
+        deadman = false;
+      }
       if (~ioexp_1_AB >> PIN_MC_5 & 1) {
         if ((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 4)) {
           notch_mc = 4;
@@ -577,14 +582,14 @@ void read_MC(void) {
         }
       }
     } else {
-      if (set_InputFlip >> 6 & 1) {  //非常有効時
-
+      if (set_InputFlip >> 6 & 1 && !deadman) {  //非常有効時
         //マスコンデッドマン仮実装
         notch_mc = 0;
         notch_name = "N ";
         notch_brk = set_BrakeNotchNum + 1;
         notch_brk_name = "EB";
         autoair_dir_mask = false;
+        deadman = true;
       } else {  //抑速有効時
         if (!autoair_dir_mask) {
           if (~ioexp_1_AB >> PIN_MC_5 & 1) {
@@ -630,134 +635,97 @@ void read_Dir(void) {
 
 //ブレーキ角度読取
 uint16_t read_Break(String *str) {
-  uint16_t adc_raw = adcRead(0);
-  static uint16_t adc_latch = 0;
-  uint16_t adc = adc_raw;
-  if (set_POT_N < set_POT_EB) {
-    if (adc < set_POT_N) {
-      adc = set_POT_N;
-    } else if (adc > set_POT_EB) {
-      adc = set_POT_EB;
-    }
-  }
-  brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle * 100) / 100.0;
-
-  if (mode_POT && !modeADJ) {
-    Serial.print(" Pot1: ");
-    if (adc_raw < 10000) {
-      Serial.print('0');
-    }
-    if (adc_raw < 1000) {
-      Serial.print('0');
-    }
-    if (adc_raw < 100) {
-      Serial.print('0');
-    }
-    if (adc_raw < 10) {
-      Serial.print('0');
-    }
-    Serial.print(adc_raw);
-    Serial.print(" Deg: ");
-    if (brk_angl < 1000) {
-      Serial.print('0');
-    }
-    if (brk_angl < 100) {
-      Serial.print('0');
-    }
-    if (brk_angl < 10) {
-      Serial.print('0');
-    }
-    Serial.print(brk_angl);
-  }
-
-  static uint8_t brk_angl_latch = brk_angl;
-  static bool notch_BrakeAAB_latch = notch_BrakeAAB;
-  //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
-  if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter) {
-
-    //直通帯の処理
-    if (brk_angl < set_BrakeSAPAngle) {
-      //N位置
-      if (brk_angl <= set_Brake10DegAngl) {
-        notch_brk = 0;
-        sap_notch_brk = 0;
-
-        //直通帯位置(※常用最大67°位置まで)
-      } else if (brk_angl < set_Brake67DegAngl) {
-        uint16_t temp_notch_brk = round((float)(brk_angl - set_Brake10DegAngl) / (float)(set_Brake67DegAngl - set_Brake10DegAngl) * (set_BrakeNotchNum - 1) + 0.5);
-        notch_brk = temp_notch_brk;
-        sap_notch_brk = notch_brk;
-
-        //常用最大67°位置～直通帯範囲まで
-      } else {
-        if (mode_TS185 && notch_BrakeAAB) {
-          Keyboard.write('K');
-        }
-        notch_brk = set_BrakeNotchNum;
-        sap_notch_brk = set_BrakeNotchNum;
-        autoair_dir_mask = false;
-        EB_latch = false;
-        notch_BrakeAAB = false;
+  if (!deadman) {
+    uint16_t adc_raw = adcRead(0);
+    static uint16_t adc_latch = 0;
+    uint16_t adc = adc_raw;
+    if (set_POT_N < set_POT_EB) {
+      if (adc < set_POT_N) {
+        adc = set_POT_N;
+      } else if (adc > set_POT_EB) {
+        adc = set_POT_EB;
       }
-      notch_brk_name = 'B' + String(notch_brk);
+    }
+    brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle * 100) / 100.0;
+
+    if (mode_POT && !modeADJ) {
+      Serial.print(" Pot1: ");
+      if (adc_raw < 10000) {
+        Serial.print('0');
+      }
+      if (adc_raw < 1000) {
+        Serial.print('0');
+      }
+      if (adc_raw < 100) {
+        Serial.print('0');
+      }
+      if (adc_raw < 10) {
+        Serial.print('0');
+      }
+      Serial.print(adc_raw);
+      Serial.print(" Deg: ");
+      if (brk_angl < 1000) {
+        Serial.print('0');
+      }
+      if (brk_angl < 100) {
+        Serial.print('0');
+      }
+      if (brk_angl < 10) {
+        Serial.print('0');
+      }
+      Serial.print(brk_angl);
     }
 
-    //自動帯の処理
-    else if (brk_angl < set_BrakeEBAngle) {
-      if (use_AutoAirBrake) {
-        //抜き取り・保ち位置
-        if (brk_angl < set_BrakeAutoAir1Angle) {
-          if (mode_TS185) {
-            if (!notch_BrakeAAB) {
-              Keyboard.write(',');
-            }
-            Keyboard.release('.');
-          } else {
-            notch_brk = 0;
-          }
-          notch_BrakeAAB = true;
-          notch_brk_name = "A0";
-          //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-          if (notch_mc == 0) {
-            if (!modeN && !use_BveEX) {
-              autoair_dir_mask = true;
-              iDir = 0;
-            }
-            //マスコンノッチが0以外の時はレバーサマスクをfalse
-          } else {
-            autoair_dir_mask = false;
-          }
+    static uint8_t brk_angl_latch = brk_angl;
+    static bool notch_BrakeAAB_latch = notch_BrakeAAB;
+    //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
+    if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter) {
 
-          //自動帯減圧位置(弱)
-        } else if (brk_angl < set_BrakeAutoAir2Angle) {
-          if (modeN) {
-            notch_brk_name = "A1";
-          } else {
-            if (mode_TS185) {
-              Keyboard.press('.');
-            }
-            //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-            if (notch_mc == 0) {
-              if (!modeN && !use_BveEX && !mode_TS185) {
-                autoair_dir_mask = true;
-                iDir = 0;
-              }
-              //マスコンノッチが0以外の時はレバーサマスクをfalse
-            } else {
-              autoair_dir_mask = false;
-            }
-          }
-          //自動帯減圧位置(強)
+      //直通帯の処理
+      if (brk_angl < set_BrakeSAPAngle) {
+        //N位置
+        if (brk_angl <= set_Brake10DegAngl) {
+          notch_brk = 0;
+          sap_notch_brk = 0;
+
+          //直通帯位置(※常用最大67°位置まで)
+        } else if (brk_angl < set_Brake67DegAngl) {
+          uint16_t temp_notch_brk = round((float)(brk_angl - set_Brake10DegAngl) / (float)(set_Brake67DegAngl - set_Brake10DegAngl) * (set_BrakeNotchNum - 1) + 0.5);
+          notch_brk = temp_notch_brk;
+          sap_notch_brk = notch_brk;
+
+          //常用最大67°位置～直通帯範囲まで
         } else {
-          if (modeN) {
-            notch_brk_name = "A2";
-          } else {
+          if (mode_TS185 && notch_BrakeAAB) {
+            Keyboard.write('K');
+          }
+          notch_brk = set_BrakeNotchNum;
+          sap_notch_brk = set_BrakeNotchNum;
+          autoair_dir_mask = false;
+          EB_latch = false;
+          notch_BrakeAAB = false;
+        }
+        notch_brk_name = 'B' + String(notch_brk);
+      }
+
+      //自動帯の処理
+      else if (brk_angl < set_BrakeEBAngle) {
+        if (use_AutoAirBrake) {
+          //抜き取り・保ち位置
+          if (brk_angl < set_BrakeAutoAir1Angle) {
             if (mode_TS185) {
-              Keyboard.press('.');
+              if (!notch_BrakeAAB) {
+                Keyboard.write(',');
+              }
+              Keyboard.release('.');
+            } else {
+              notch_brk = 0;
             }
+            notch_BrakeAAB = true;
+            notch_brk_name = "A0";
             //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
             if (notch_mc == 0) {
-              if (!modeN && !use_BveEX && !mode_TS185) {
+              if (!modeN && !use_BveEX) {
                 autoair_dir_mask = true;
                 iDir = 0;
               }
@@ -765,54 +733,93 @@ uint16_t read_Break(String *str) {
             } else {
               autoair_dir_mask = false;
             }
+
+            //自動帯減圧位置(弱)
+          } else if (brk_angl < set_BrakeAutoAir2Angle) {
+            if (modeN) {
+              notch_brk_name = "A1";
+            } else {
+              if (mode_TS185) {
+                Keyboard.press('.');
+              }
+              //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
+              if (notch_mc == 0) {
+                if (!modeN && !use_BveEX && !mode_TS185) {
+                  autoair_dir_mask = true;
+                  iDir = 0;
+                }
+                //マスコンノッチが0以外の時はレバーサマスクをfalse
+              } else {
+                autoair_dir_mask = false;
+              }
+            }
+            //自動帯減圧位置(強)
+          } else {
+            if (modeN) {
+              notch_brk_name = "A2";
+            } else {
+              if (mode_TS185) {
+                Keyboard.press('.');
+              }
+              //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
+              if (notch_mc == 0) {
+                if (!modeN && !use_BveEX && !mode_TS185) {
+                  autoair_dir_mask = true;
+                  iDir = 0;
+                }
+                //マスコンノッチが0以外の時はレバーサマスクをfalse
+              } else {
+                autoair_dir_mask = false;
+              }
+            }
           }
+          //自動帯非使用時は直通帯常用最大扱い
+        } else {
+          notch_BrakeAAB = false;
+          notch_brk = set_BrakeNotchNum;
+          autoair_dir_mask = false;
         }
-        //自動帯非使用時は直通帯常用最大扱い
+
+
+        //非常位置
       } else {
-        notch_BrakeAAB = false;
-        notch_brk = set_BrakeNotchNum;
+        notch_brk = set_BrakeNotchNum + 1;
+        notch_brk_name = "EB";
         autoair_dir_mask = false;
+        EB_latch = true;
       }
-
-
-      //非常位置
-    } else {
-      notch_brk = set_BrakeNotchNum + 1;
-      notch_brk_name = "EB";
-      autoair_dir_mask = false;
-      EB_latch = true;
+      if (notch_BrakeAAB != notch_BrakeAAB_latch && !mode_TS185) {
+        Serial.print("AAB ");
+        Serial.println(notch_BrakeAAB);
+      }
+      notch_BrakeAAB_latch = notch_BrakeAAB;
+      brk_angl_latch = brk_angl;
     }
-    if (notch_BrakeAAB != notch_BrakeAAB_latch && !mode_TS185) {
-      Serial.print("AAB ");
-      Serial.println(notch_BrakeAAB);
+
+    if (use_AutoAirBrake) {
+      BP(&brk_angl, str);
     }
-    notch_BrakeAAB_latch = notch_BrakeAAB;
-    brk_angl_latch = brk_angl;
-  }
 
-  if (use_AutoAirBrake) {
-    BP(&brk_angl, str);
+    //ポテンショ生データ表示モード
+    if (mode_POT && !modeADJ) {
+      Serial.print(" Notch: ");
+      Serial.print(notch_brk_name);
+      Serial.print(" BP: ");
+      Serial.print(BP_press);
+      Serial.print(" BP_notch: ");
+      Serial.println(autoair_notch_brk);
+    }
+    //調整モード
+    if (!mode_POT && modeADJ && adc != adc_latch) {
+      Serial.print("ADC: ");
+      Serial.print(10000 + adc);
+      Serial.print(" DEG: ");
+      Serial.print(1000 + brk_angl);
+      Serial.print(" ");
+      Serial.println(notch_brk_name);
+    }
+    adc_latch = adc;
   }
-
-  //ポテンショ生データ表示モード
-  if (mode_POT && !modeADJ) {
-    Serial.print(" Notch: ");
-    Serial.print(notch_brk_name);
-    Serial.print(" BP: ");
-    Serial.print(BP_press);
-    Serial.print(" BP_notch: ");
-    Serial.println(autoair_notch_brk);
-  }
-  //調整モード
-  if (!mode_POT && modeADJ && adc != adc_latch) {
-    Serial.print("ADC: ");
-    Serial.print(10000 + adc);
-    Serial.print(" DEG: ");
-    Serial.print(1000 + brk_angl);
-    Serial.print(" ");
-    Serial.println(notch_brk_name);
-  }
-  adc_latch = adc;
 }
 
 //キーボード(HID)出力
@@ -829,22 +836,18 @@ void keyboard_control(void) {
           if ((notch_mc - notch_mc_latch) > 0) {
             Keyboard.write('Z');
             if (notch_mc == 3) {
-              Serial1.print("ATSM3");
-              Serial1.print('\r');
+              Serial1Print("ATSM3", false);
             }
             if (notch_mc == 1) {
-              Serial1.print("ATSM1");
-              Serial1.print('\r');
+              Serial1Print("ATSM1", false);
             }
           } else {
             Keyboard.write('A');
             if (notch_mc == 0) {
-              Serial1.print("ATSM0");
-              Serial1.print('\r');
+              Serial1Print("ATSM0", false);
             }
             if (notch_mc == 2) {
-              Serial1.print("ATSM2");
-              Serial1.print('\r');
+              Serial1Print("ATSM2", false);
             }
           }
         }
@@ -1082,13 +1085,9 @@ void read_Ats(void) {
   //ATS確認位置転送
   if (use_AtsContact) {
     if (Ats_Pos && !Ats_Pos_latch) {
-      Serial1.print("ATS 1");
-      Serial1.print("\r");
-      Serial.println("ATS 1 ON");
+      Serial1Print("ATS 1", true);
     } else if (!Ats_Pos && Ats_Pos_latch) {
-      Serial1.print("ATS 0");
-      Serial1.print("\r");
-      Serial.println("ATS 0 OFF");
+      Serial1Print("ATS 0", true);
     }
   }
   Ats_Pos_latch = Ats_Pos;
@@ -1103,17 +1102,12 @@ void read_Ats(void) {
   if (Ats_Cont != Ats_Cont_latch) {
     if (Ats_Cont) {
       if (modeBVE) {
-        Serial1.print("ACT 1");
-        Serial1.print("\r");
-        Serial.println("ACT 1 ON");
+        Serial1Print("ACT 1", true);
         Keyboard.press(0xD1);  //"Insert"
       }
     } else {
       if (modeBVE) {
-        Serial1.print("ACT 0");
-        Serial1.print("\r");
-        Serial.println("ACT 0 OFF");
-
+        Serial1Print("ACT 0", true);
         Keyboard.release(0xD1);
       }
     }
@@ -1130,19 +1124,13 @@ void read_Ats(void) {
     if (Ats_Conf) {
       if (modeBVE) {
         if (Ats_Pos) {
-          Serial1.print("ACF 1");
-          Serial1.print("\r");
-          Serial.println("ACF 1 ON");
-
+          Serial1Print("ACF 1", true);
           Keyboard.press(0x20);  //"Space"
         }
       }
     } else {
       if (modeBVE) {
-        Serial1.print("ACF 0");
-        Serial1.print("\r");
-        Serial.println("ACF 0 OFF");
-
+        Serial1Print("ACF 0", true);
         Keyboard.release(0x20);
       }
     }
@@ -1688,5 +1676,13 @@ void setStringAt(uint8_t startIndex, String *str, uint16_t value) {
     for (int i = 0; i < 3; i++) {
       str->setCharAt(startIndex + i, char(d[i]));
     }
+  }
+}
+
+void Serial1Print(String command, bool monitor) {
+  Serial1.print(command);
+  Serial1.print('\r');
+  if (monitor) {
+    Serial.println(command);
   }
 }
