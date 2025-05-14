@@ -66,6 +66,7 @@
 //V4.2.1.3 BveEX起動時、直通帯でBCが動かない不具合修正
 //V4.2.1.4 JRETS185系に仮対応
 //V4.2.1.5 マスコンEBに対応
+//V4.2.1.6 外部からのキー入力に対応("KEY c"c:char or "KEY 0xXX")
 
 /*set_InputFlip
   1bit:警報持続
@@ -216,6 +217,8 @@ uint16_t Auto_Notch_Adjust = 1;      //078自動ノッチ合わせ機構
 bool EB_latch = false;
 bool deadman = false;
 
+bool Pan_Mode = true;  //PAN 1:通電 PAN 0:停電
+
 
 void setup() {
   pinMode(SS_Brk, OUTPUT);   //MCP3008
@@ -362,6 +365,25 @@ void loop() {
           uint8_t nnn = 0;
           Serial.println(rw_eeprom(device, 0, (uint16_t)&nnn, false, false));
         }
+      }
+
+      //キーボードモード 4.2.1.6追加
+    } else if (strbve.startsWith("KEY")) {
+      if (strbve.length() > 4) {
+        if (strbve.indexOf("0x") > 0) {
+          char c_str[5];
+          strbve.substring(4, 8).toCharArray(c_str, 5);
+          Keyboard.write(strtol(c_str, NULL, 0));
+        } else {
+          char c = strbve.charAt(4);
+          Keyboard.write(c);
+        }
+      }
+
+      //PANモード 4.2.1.6追加
+    } else if (strbve.startsWith("PAN")) {
+      if (strbve.length() > 4) {
+        Pan_Mode = strbve.charAt(4) == '1';
       }
 
     } else if (strbve.startsWith("MD ")) {
@@ -646,7 +668,7 @@ uint16_t read_Break(String *str) {
         adc = set_POT_EB;
       }
     }
-    brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle * 100) / 100.0;
+    brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle);
 
     if (mode_POT && !modeADJ) {
       Serial.print(" Pot1: ");
@@ -736,7 +758,7 @@ uint16_t read_Break(String *str) {
 
             //自動帯減圧位置(弱)
           } else if (brk_angl < set_BrakeAutoAir2Angle) {
-            if (modeN) {
+            if (modeN || modeADJ || mode_POT) {
               notch_brk_name = "A1";
             } else {
               if (mode_TS185) {
@@ -755,7 +777,7 @@ uint16_t read_Break(String *str) {
             }
             //自動帯減圧位置(強)
           } else {
-            if (modeN) {
+            if (modeN || modeADJ || mode_POT) {
               notch_brk_name = "A2";
             } else {
               if (mode_TS185) {
@@ -1412,9 +1434,12 @@ void disp_CurrentMeter(int16_t current) {
   }
   //電圧計モードのとき計算後2000Vを超えた時は2000Vに固定
   if (set_CurrentMeterMode) {
-    uint16_t v = 1500 - (current * (set_VehicleResistance / 1000.0));
-    if (v > 2000) {
-      v = 2000;
+    uint16_t v = 0;
+    if (Pan_Mode) {
+      v = 1500 - (current * (set_VehicleResistance / 1000.0));
+      if (v > 2000) {
+        v = 2000;
+      }
     }
     //出力
 #ifndef SIMPLE
@@ -1445,15 +1470,17 @@ void read_Serial1() {
   if (Serial1.available() > 0) {
     String str1 = Serial1.readStringUntil('\r');
     //実際のエアーを使用する場合はBC_pressにSerial1から圧力値を格納
-    if (str1.startsWith("BC ")) {
-      if (use_AutoAirBrake && !mode_TS185) {
-        if (use_AAB_RealAir) {
-          BC_press = str1.substring(3, 6).toInt();
-          Serial.println(str1);
+    if (!modeADJ && !mode_POT) {
+      if (str1.startsWith("BC ")) {
+        if (use_AutoAirBrake && !mode_TS185) {
+          if (use_AAB_RealAir) {
+            BC_press = str1.substring(3, 6).toInt();
+            Serial.println(str1);
+          }
         }
+      } else {
+        Serial.println(str1);
       }
-    } else {
-      Serial.println(str1);
     }
   }
 }
