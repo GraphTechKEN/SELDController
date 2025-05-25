@@ -67,6 +67,7 @@
 //V4.2.1.4 JRETS185系に仮対応
 //V4.2.1.5 マスコンEBに対応
 //V4.2.1.6 外部からのキー入力に対応("KEY c"c:char or "KEY 0xXX")
+//V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
 
 /*set_InputFlip
   1bit:警報持続
@@ -131,13 +132,12 @@ SPISettings settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
-int8_t notch_mc = 0;               //マスコンノッチ
-String notch_name = "";            //マスコンノッチ名称
-uint8_t notch_brk = 0;             //ブレーキノッチ
-uint8_t notch_brk_latch = 0;       //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
-uint8_t sap_notch_brk = 0;         //ブレーキノッチ(直通帯)
-String notch_brk_name = "";        //ブレーキノッチ名称
-String notch_brk_name_latch = "";  //ブレーキノッチ名称格納
+int8_t notch_mc = 0;          //マスコンノッチ
+char notch_name[3];           //マスコンノッチ名称
+uint8_t notch_brk = 0;        //ブレーキノッチ
+uint8_t notch_brk_latch = 0;  //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
+uint8_t sap_notch_brk = 0;    //ブレーキノッチ(直通帯)
+String notch_brk_name = "";   //ブレーキノッチ名称
 //以下ブレーキ設定値
 
 uint16_t set_BrakeNotchNum = 8;         //004 常用ブレーキ段数
@@ -189,7 +189,6 @@ bool mode_POT = false;
 //運転モード
 bool modeBVE = true;
 bool modeN = false;
-bool modeADJ = false;
 
 //自動ブレーキ帯
 
@@ -218,6 +217,8 @@ bool EB_latch = false;
 bool deadman = false;
 
 bool Pan_Mode = true;  //PAN 1:通電 PAN 0:停電
+
+bool EB_JR_move_E = false;  //非常ブレーキ
 
 
 void setup() {
@@ -343,7 +344,7 @@ void loop() {
   use_AutoAirBrakeDirectSend = set_AutoAirBrake >> 3 & 1;
   mode_TS185 = set_AutoAirBrake >> 4 & 1;
   read_Serial1();
-  read_USB(&strbve);
+  read_USB(strbve);
 
   if (strbve != strbve_latch) {
     uint8_t i = 0;
@@ -369,16 +370,7 @@ void loop() {
 
       //キーボードモード 4.2.1.6追加
     } else if (strbve.startsWith("KEY")) {
-      if (strbve.length() > 4) {
-        if (strbve.indexOf("0x") > 0) {
-          char c_str[5];
-          strbve.substring(4, 8).toCharArray(c_str, 5);
-          Keyboard.write(strtol(c_str, NULL, 0));
-        } else {
-          char c = strbve.charAt(4);
-          Keyboard.write(c);
-        }
-      }
+      KeyPut(strbve);
 
       //PANモード 4.2.1.6追加
     } else if (strbve.startsWith("PAN")) {
@@ -398,22 +390,6 @@ void loop() {
             s += "ON";
           } else {
             modeN = false;
-            s += "OFF";
-          }
-        }
-      }
-
-      //ブレーキ弁調整モード
-      else if (strbve.indexOf("ADJ ") > 0) {
-        s = "OK ADJ ";
-        if (strbve.length() > 7) {
-          int16_t num = strbve.substring(7, 12).toInt();
-
-          if (num) {
-            modeADJ = true;
-            s += "ON";
-          } else {
-            modeADJ = false;
             s += "OFF";
           }
         }
@@ -447,12 +423,14 @@ void loop() {
         bve_current = strbve.substring(7, 12).toInt();
 
         //自動ノッチ合わせ機構
-        AutoNotch(&strbve);
+        AutoNotch(strbve);
 
         //BC抽出
         if (strbve.length() >= 67) {
           bve_BC_press = strbve.substring(55, 58).toInt();
           bve_SAP_press = strbve.substring(63, 66).toInt();
+          //非常ブレーキ抽出
+          EB_JR_move_E = strbve.substring(36, 37).toInt();
         }
       }
     }
@@ -465,7 +443,7 @@ void loop() {
 
 
     //Serial1転送
-    send_Serial1(&strbve);
+    send_Serial1(strbve);
     strbve_latch = strbve;
   }
 
@@ -484,7 +462,7 @@ void loop() {
 
   //圧力値が変動時、下位および上位に伝送
   if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
-    send_Serial1(&strbve);
+    send_Serial1(strbve);
     //V4.2.1.1追加 実際のエアー圧を使用しない場合はBCの変化時にPCへ伝送
     if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185) {
       if (BC_press != BC_press_latch) {
@@ -565,36 +543,28 @@ void read_MC(void) {
       if (~ioexp_1_AB >> PIN_MC_5 & 1) {
         if ((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 4)) {
           notch_mc = 4;
-          notch_name = "P4";
         } else if ((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 5)) {
           notch_mc = 5;
-          notch_name = "P5";
         }
         autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_4 & 1) {
         if ((set_MCNotchNumConsole == 4) && (set_MCNotchNumBVE == 5)) {
           notch_mc = 5;
-          notch_name = "P5";
         } else if (((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 5)) || ((set_MCNotchNumConsole == 4) && (set_MCNotchNumBVE == 4))) {
           notch_mc = 4;
-          notch_name = "P4";
         }
         autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_3 & 1) {
         notch_mc = 3;
-        notch_name = "P3";
         autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_2 & 1) {
         notch_mc = 2;
-        notch_name = "P2";
         autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_1 & 1) {
         notch_mc = 1;
-        notch_name = "P1";
         autoair_dir_mask = false;
       } else {
         notch_mc = 0;
-        notch_name = "P0";
         //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
         if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle && use_AutoAirBrake && !use_BveEX) {
           if (!modeN) {
@@ -607,7 +577,6 @@ void read_MC(void) {
       if (set_InputFlip >> 6 & 1 && !deadman) {  //非常有効時
         //マスコンデッドマン仮実装
         notch_mc = 0;
-        notch_name = "N ";
         notch_brk = set_BrakeNotchNum + 1;
         notch_brk_name = "EB";
         autoair_dir_mask = false;
@@ -616,25 +585,22 @@ void read_MC(void) {
         if (!autoair_dir_mask) {
           if (~ioexp_1_AB >> PIN_MC_5 & 1) {
             notch_mc = -1;
-            notch_name = "H1";
           } else if (~ioexp_1_AB >> PIN_MC_3 & 1 && ioexp_1_AB >> PIN_MC_4 & 1) {
             notch_mc = -2;
-            notch_name = "H2";
           } else if (~ioexp_1_AB >> PIN_MC_2 & 1 && ioexp_1_AB >> PIN_MC_4 & 1) {
             notch_mc = -3;
-            notch_name = "H3";
           } else if (~ioexp_1_AB >> PIN_MC_2 & 1 && ~ioexp_1_AB >> PIN_MC_4 & 1) {
             notch_mc = -4;
-            notch_name = "H4";
           } else if (~ioexp_1_AB >> PIN_MC_3 & 1 && ~ioexp_1_AB >> PIN_MC_4 & 1) {
             notch_mc = -5;
-            notch_name = "H5";
           }
         }
       }
     }
   }
   mcBit_latch = mcBit;
+  notch_name[0] = (notch_mc >= 0) ? 'P' : 'H';
+  notch_name[1] = char(abs(notch_mc));
 }
 
 //マスコンレバーサ読取
@@ -670,7 +636,7 @@ uint16_t read_Break(String *str) {
     }
     brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle);
 
-    if (mode_POT && !modeADJ) {
+    if (mode_POT) {
       Serial.print(" Pot1: ");
       if (adc_raw < 10000) {
         Serial.print('0');
@@ -758,7 +724,7 @@ uint16_t read_Break(String *str) {
 
             //自動帯減圧位置(弱)
           } else if (brk_angl < set_BrakeAutoAir2Angle) {
-            if (modeN || modeADJ || mode_POT) {
+            if (modeN || mode_POT) {
               notch_brk_name = "A1";
             } else {
               if (mode_TS185) {
@@ -777,7 +743,7 @@ uint16_t read_Break(String *str) {
             }
             //自動帯減圧位置(強)
           } else {
-            if (modeN || modeADJ || mode_POT) {
+            if (modeN || mode_POT) {
               notch_brk_name = "A2";
             } else {
               if (mode_TS185) {
@@ -823,22 +789,13 @@ uint16_t read_Break(String *str) {
     }
 
     //ポテンショ生データ表示モード
-    if (mode_POT && !modeADJ) {
+    if (mode_POT) {
       Serial.print(" Notch: ");
       Serial.print(notch_brk_name);
       Serial.print(" BP: ");
       Serial.print(BP_press);
       Serial.print(" BP_notch: ");
       Serial.println(autoair_notch_brk);
-    }
-    //調整モード
-    if (!mode_POT && modeADJ && adc != adc_latch) {
-      Serial.print("ADC: ");
-      Serial.print(10000 + adc);
-      Serial.print(" DEG: ");
-      Serial.print(1000 + brk_angl);
-      Serial.print(" ");
-      Serial.println(notch_brk_name);
     }
     adc_latch = adc;
   }
@@ -906,8 +863,8 @@ void keyboard_control(void) {
   }
 
   //ブレーキノッチ(角度)が前回と異なるとき
-  if (notch_brk != notch_brk_latch || notch_brk_name != notch_brk_name_latch) {
-    if (modeBVE && !modeADJ && !modeN) {
+  if (notch_brk != notch_brk_latch) {
+    if (modeBVE && !modeN) {
       uint8_t d = abs(notch_brk - notch_brk_latch);
       //ブレーキノッチ
       //if (notch_brk <= (set_BrakeNotchNum + 1) && notch_brk_latch <= (set_BrakeNotchNum + 1) && notch_brk > 0) {
@@ -965,7 +922,6 @@ void keyboard_control(void) {
     }
   }
   notch_brk_latch = notch_brk;
-  notch_brk_name_latch = notch_brk_name;
   autoair_notch_brk_latch = autoair_notch_brk;
   iDir_latch = iDir;
 }
@@ -1275,50 +1231,38 @@ void BP(uint8_t *angl, String *str) {
 
     static unsigned long bp_millis = 0;
     static unsigned long er_millis = 0;
-    //直通帯(運転位置)でBP,ERを加圧
-    if (*angl < set_BrakeSAPAngle) {
-      if ((millis() - bp_millis) > bp_span) {
-        if (BP_press < 490) {
-          BP_press++;
-        }
-        if (ER_press < 490) {
-          ER_press++;
-        }
-        bp_millis = millis();
-      }
-      //重なり位置でBP,ERは維持
-    } else if (*angl < set_BrakeAutoAir1Angle) {
-
-      //常用位置でBPとER圧を減圧
-    } else if (*angl < set_BrakeEBAngle) {
-      if ((millis() - bp_millis) > bp_span) {
-        if (BP_press > 0) {
-          BP_press--;
-        }
-        if (ER_press > 0) {
-          ER_press--;
-        }
-        bp_millis = millis();
-      }
-
-      //非常位置
-    } else if (*angl >= set_BrakeEBAngle) {
-      //BPを急減圧
-      if ((millis() - bp_millis) > 20) {
-        if (BP_press > 0) {
-          BP_press -= 10;
-          if (BP_press < 10) {
-            BP_press = 0;
+    if (EB_JR_move_E) {
+      BP_ER_EB_Control(bp_millis, er_millis);
+    } else {
+      //直通帯(運転位置)でBP,ERを加圧
+      if (*angl < set_BrakeSAPAngle) {
+        if ((millis() - bp_millis) > bp_span) {
+          if (BP_press < 490) {
+            BP_press++;
           }
+          if (ER_press < 490) {
+            ER_press++;
+          }
+          bp_millis = millis();
         }
-        bp_millis = millis();
-      }
-      //ER圧を減圧
-      if ((millis() - er_millis) > bp_span) {
-        if (ER_press > 0) {
-          ER_press--;
+        //重なり位置でBP,ERは維持
+      } else if (*angl < set_BrakeAutoAir1Angle) {
+
+        //常用位置でBPとER圧を減圧
+      } else if (*angl < set_BrakeEBAngle) {
+        if ((millis() - bp_millis) > bp_span) {
+          if (BP_press > 0) {
+            BP_press--;
+          }
+          if (ER_press > 0) {
+            ER_press--;
+          }
+          bp_millis = millis();
         }
-        er_millis = millis();
+
+        //非常位置
+      } else if (*angl >= set_BrakeEBAngle) {
+        BP_ER_EB_Control(bp_millis, er_millis);
       }
     }
 
@@ -1375,6 +1319,26 @@ void BP(uint8_t *angl, String *str) {
   }
 }
 
+void BP_ER_EB_Control(unsigned long bp_millis, unsigned long er_millis) {
+  //BPを急減圧
+  if ((millis() - bp_millis) > 20) {
+    if (BP_press > 0) {
+      BP_press -= 10;
+      if (BP_press < 10) {
+        BP_press = 0;
+      }
+    }
+    bp_millis = millis();
+  }
+  //ER圧を減圧
+  if ((millis() - er_millis) > bp_span) {
+    if (ER_press > 0) {
+      ER_press--;
+    }
+    er_millis = millis();
+  }
+}
+
 //EEPROM読書用
 String rw_eeprom(uint16_t dev, uint16_t *n, uint16_t *param, bool write, bool NGcondition) {
   String s = "OK ";
@@ -1402,17 +1366,17 @@ String rw_eeprom(uint16_t dev, uint16_t *n, uint16_t *param, bool write, bool NG
 }
 
 //ノッチ自動調整 BVEからの入力に対して現在状態の比較を行い、ラッチに格納することでメインループで自動的に修正する
-void AutoNotch(String *str) {
-  if (str->length() > 49) {
+void AutoNotch(String &str) {
+  if (str.length() > 49) {
     if (Auto_Notch_Adjust) {
-      if (str->charAt(47) == 'B') {
+      if (str.charAt(47) == 'B') {
         int bve_rev = 0;
-        if (str->charAt(44) == 'F') {
+        if (str.charAt(44) == 'F') {
           bve_rev = 1;
-        } else if (str->charAt(44) == 'B') {
+        } else if (str.charAt(44) == 'B') {
           bve_rev = -1;
         }
-        String bve_brk = str->substring(48, 50);
+        String bve_brk = str.substring(48, 50);
         char Buf[4];
         bve_brk.toCharArray(Buf, 4);
         uint8_t num = strtol(Buf, NULL, 16);  //16進数→10進数に変換
@@ -1470,7 +1434,7 @@ void read_Serial1() {
   if (Serial1.available() > 0) {
     String str1 = Serial1.readStringUntil('\r');
     //実際のエアーを使用する場合はBC_pressにSerial1から圧力値を格納
-    if (!modeADJ && !mode_POT) {
+    if (!mode_POT) {
       if (str1.startsWith("BC ")) {
         if (use_AutoAirBrake && !mode_TS185) {
           if (use_AAB_RealAir) {
@@ -1478,27 +1442,29 @@ void read_Serial1() {
             Serial.println(str1);
           }
         }
-      } else {
-        Serial.println(str1);
+      } else if (str1.startsWith("KEY")) {
+        KeyPut(str1);
       }
+    } else {
+      Serial.println(str1);
     }
   }
 }
 
-void read_USB(String *str) {
+void read_USB(String &str) {
   if (Serial.available()) {
-    *str = Serial.readStringUntil('\r');
+    str = Serial.readStringUntil('\r');
   }
 }
 
-void send_Serial1(String *str) {
+void send_Serial1(String &str) {
   if (use_AutoAirBrake) {
     //自動帯有効で自動帯投入時、直通ランプと電制を無効とする
     if (brk_angl > set_BrakeSAPAngle) {
-      if (str->length() > 18) {
+      if (str.length() > 18) {
         if (!use_BveEX) {
-          str->setCharAt(17, '0');  //直通ランプ
-          str->setCharAt(18, '0');  //電制ランプ
+          str.setCharAt(17, '0');  //直通ランプ
+          str.setCharAt(18, '0');  //電制ランプ
         }
       }
     }
@@ -1564,7 +1530,7 @@ void send_Serial1(String *str) {
       setStringAt(63, str, sap_press_latch);
     }
   }
-  Serial1.print(*str);
+  Serial1.print(str);
   Serial1.print('\r');
 }
 
@@ -1693,15 +1659,15 @@ void set_Settings(uint8_t device, int16_t num) {
   Serial.println(s);
 }
 
-void setStringAt(uint8_t startIndex, String *str, uint16_t value) {
+void setStringAt(uint8_t startIndex, String &str, uint16_t value) {
   uint16_t d[3];
   d[0] = value / 100 + 0x30;
   d[1] = value / 10 % 10 + 0x30;
   d[2] = value % 10 + 0x30;
 
-  if (str->length() >= 67) {
+  if (str.length() >= 67) {
     for (int i = 0; i < 3; i++) {
-      str->setCharAt(startIndex + i, char(d[i]));
+      str.setCharAt(startIndex + i, char(d[i]));
     }
   }
 }
@@ -1711,5 +1677,18 @@ void Serial1Print(String command, bool monitor) {
   Serial1.print('\r');
   if (monitor) {
     Serial.println(command);
+  }
+}
+
+void KeyPut(String &str) {
+  if (str.length() > 4) {
+    if (str.indexOf("0x") > 0) {
+      char c_str[5];
+      str.substring(4, 8).toCharArray(c_str, 5);
+      Keyboard.write(strtol(c_str, NULL, 0));
+    } else {
+      char c = str.charAt(4);
+      Keyboard.write(c);
+    }
   }
 }
