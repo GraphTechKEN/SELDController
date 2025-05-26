@@ -68,6 +68,7 @@
 //V4.2.1.5 マスコンEBに対応
 //V4.2.1.6 外部からのキー入力に対応("KEY c"c:char or "KEY 0xXX")
 //V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
+//V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
 
 /*set_InputFlip
   1bit:警報持続
@@ -132,12 +133,13 @@ SPISettings settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
-int8_t notch_mc = 0;          //マスコンノッチ
-char notch_name[3];           //マスコンノッチ名称
-uint8_t notch_brk = 0;        //ブレーキノッチ
-uint8_t notch_brk_latch = 0;  //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
-uint8_t sap_notch_brk = 0;    //ブレーキノッチ(直通帯)
-String notch_brk_name = "";   //ブレーキノッチ名称
+int8_t notch_mc = 0;               //マスコンノッチ
+char notch_name[3];                //マスコンノッチ名称
+uint8_t notch_brk = 0;             //ブレーキノッチ
+uint8_t notch_brk_latch = 0;       //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
+uint8_t sap_notch_brk = 0;         //ブレーキノッチ(直通帯)
+String notch_brk_name = "";        //ブレーキノッチ名称
+String notch_brk_name_latch = "";  //ブレーキノッチ名称格納
 //以下ブレーキ設定値
 
 uint16_t set_BrakeNotchNum = 8;         //004 常用ブレーキ段数
@@ -213,8 +215,8 @@ uint16_t use_AAB_RealAir = 1;        //080 実際のエアー圧で自動帯再�
 uint16_t set_MCNotchNumConsole = 5;  //070マスコンノッチ最大数
 uint16_t set_MCNotchNumBVE = 5;      //072マスコンノッチ数(車両)
 uint16_t Auto_Notch_Adjust = 1;      //078自動ノッチ合わせ機構
-bool EB_latch = false;
-bool deadman = false;
+bool EB_latch = false;               //非常ラッチ　自動帯で解除されないようにする
+bool deadman = false;                //デッドマン
 
 bool Pan_Mode = true;  //PAN 1:通電 PAN 0:停電
 
@@ -463,8 +465,8 @@ void loop() {
   //圧力値が変動時、下位および上位に伝送
   if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
     send_Serial1(strbve);
-    //V4.2.1.1追加 実際のエアー圧を使用しない場合はBCの変化時にPCへ伝送
-    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185) {
+    //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、Nモードでない)はBCの変化時にPCへ伝送
+    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && !modeN) {
       if (BC_press != BC_press_latch) {
         Serial.print("BC ");
         Serial.println(BC_press);
@@ -671,6 +673,7 @@ uint16_t read_Break(String *str) {
 
       //直通帯の処理
       if (brk_angl < set_BrakeSAPAngle) {
+        EB_latch = false;  //非常ラッチ解除 V4.1.2.8位置移動
         //N位置
         if (brk_angl <= set_Brake10DegAngl) {
           notch_brk = 0;
@@ -690,7 +693,6 @@ uint16_t read_Break(String *str) {
           notch_brk = set_BrakeNotchNum;
           sap_notch_brk = set_BrakeNotchNum;
           autoair_dir_mask = false;
-          EB_latch = false;
           notch_BrakeAAB = false;
         }
         notch_brk_name = 'B' + String(notch_brk);
@@ -707,7 +709,10 @@ uint16_t read_Break(String *str) {
               }
               Keyboard.release('.');
             } else {
-              notch_brk = 0;
+              //4.2.1.8 TS185モード時以外、非常投入から抜取位置にしても非常を維持するよう変更
+              if (!EB_latch) {
+                notch_brk = 0;
+              }
             }
             notch_BrakeAAB = true;
             notch_brk_name = "A0";
@@ -863,7 +868,7 @@ void keyboard_control(void) {
   }
 
   //ブレーキノッチ(角度)が前回と異なるとき
-  if (notch_brk != notch_brk_latch) {
+  if (notch_brk != notch_brk_latch || notch_brk_name != notch_brk_name_latch) {
     if (modeBVE && !modeN) {
       uint8_t d = abs(notch_brk - notch_brk_latch);
       //ブレーキノッチ
@@ -922,6 +927,7 @@ void keyboard_control(void) {
     }
   }
   notch_brk_latch = notch_brk;
+  notch_brk_name_latch = notch_brk_name;
   autoair_notch_brk_latch = autoair_notch_brk;
   iDir_latch = iDir;
 }
@@ -1486,6 +1492,7 @@ void send_Serial1(String &str) {
           }
         }
       }
+
       setStringAt(55, str, BC_press);
       //BP
       setStringAt(67, str, BP_press);
@@ -1509,7 +1516,7 @@ void send_Serial1(String &str) {
             sap_press_latch = bve_SAP_press;
           } else {
             uint16_t tmp_sap_press = map(sap_notch_brk, 0, set_BrakeNotchNum, 0, 440);
-            if (tmp_sap_press > BC_press) {
+            if (tmp_sap_press > bve_SAP_press) {
               sap_auto_mask = false;
             }
           }
