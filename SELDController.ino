@@ -69,6 +69,7 @@
 //V4.2.1.6 外部からのキー入力に対応("KEY c"c:char or "KEY 0xXX")
 //V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
 //V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
+//V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_MC1の判定をorで追加)
 
 /*set_InputFlip
   1bit:警報持続
@@ -585,7 +586,7 @@ void read_MC(void) {
         deadman = true;
       } else {  //抑速有効時
         if (!autoair_dir_mask) {
-          if (~ioexp_1_AB >> PIN_MC_5 & 1) {
+          if (~ioexp_1_AB >> PIN_MC_5 & 1 || ~ioexp_1_AB >> PIN_MC_1 & 1) {
             notch_mc = -1;
           } else if (~ioexp_1_AB >> PIN_MC_3 & 1 && ioexp_1_AB >> PIN_MC_4 & 1) {
             notch_mc = -2;
