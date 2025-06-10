@@ -70,6 +70,7 @@
 //V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
 //V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
 //V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_DECの判定のみ)
+//V4.2.2.1 ブレーキ弁EB入力対応 
 
 /*set_InputFlip
   1bit:警報持続
@@ -1076,6 +1077,33 @@ void read_Ats(void) {
     }
   }
   Ats_Pos_latch = Ats_Pos;
+
+  //EB
+  bool EB_In = (adcRead(4) < 1);
+  static uint8_t EB_In_Count_On = 0;
+  static uint8_t EB_In_Count_Off = 0;
+  static bool EB_Pos = false;
+  if (EB_In) {
+    EB_In_Count_On++;
+    EB_In_Count_Off = 0;
+  } else {
+    EB_In_Count_Off++;
+    EB_In_Count_On = 0;
+  }
+  if (EB_In_Count_On > 10) {
+    EB_In_Count_On = 10;
+    EB_Pos = true;
+  } else if (EB_In_Count_Off > 10) {
+    EB_In_Count_Off = 10;
+    EB_Pos = false;
+  }
+
+  if (EB_Pos) {
+    notch_brk = set_BrakeNotchNum + 1;
+    notch_brk_name = "EB";
+    autoair_dir_mask = false;
+    EB_latch = true;
+  }
 
   //ATS警報持続
   bool Ats_Cont = ~ioexp_1_AB >> PIN_ATS_CONT & 1;  //警報持続スイッチ
