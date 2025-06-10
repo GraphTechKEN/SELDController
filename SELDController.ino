@@ -70,7 +70,7 @@
 //V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
 //V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
 //V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_DECの判定のみ)
-//V4.2.2.1 ブレーキ弁EB入力対応 
+//V4.2.2.1 ブレーキ弁EB入力対応、ATSMxコマンドの修正
 
 /*set_InputFlip
   1bit:警報持続
@@ -561,14 +561,18 @@ void read_MC(void) {
       } else if (~ioexp_1_AB >> PIN_MC_3 & 1) {
         notch_mc = 3;
         autoair_dir_mask = false;
+        Serial1Print("ATSM3", false);
       } else if (~ioexp_1_AB >> PIN_MC_2 & 1) {
         notch_mc = 2;
         autoair_dir_mask = false;
+        Serial1Print("ATSM2", false);
       } else if (~ioexp_1_AB >> PIN_MC_1 & 1) {
         notch_mc = 1;
         autoair_dir_mask = false;
+        Serial1Print("ATSM1", false);
       } else {
         notch_mc = 0;
+        Serial1Print("ATSM0", false);
         //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
         if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle && use_AutoAirBrake && !use_BveEX) {
           if (!modeN) {
@@ -821,20 +825,8 @@ void keyboard_control(void) {
           //進段
           if ((notch_mc - notch_mc_latch) > 0) {
             Keyboard.write('Z');
-            if (notch_mc == 3) {
-              Serial1Print("ATSM3", false);
-            }
-            if (notch_mc == 1) {
-              Serial1Print("ATSM1", false);
-            }
           } else {
             Keyboard.write('A');
-            if (notch_mc == 0) {
-              Serial1Print("ATSM0", false);
-            }
-            if (notch_mc == 2) {
-              Serial1Print("ATSM2", false);
-            }
           }
         }
       } else {
