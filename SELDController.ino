@@ -71,6 +71,7 @@
 //V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
 //V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_DECの判定のみ)
 //V4.2.2.1 ブレーキ弁EB入力対応、ATSMxコマンドの修正
+//V4.2.2.2 事故モードを追加、マスコン、レバーサ無効、抑速段処理軽量化、Serial1→USB通信修正
 
 /*set_InputFlip
   1bit:警報持続
@@ -220,7 +221,8 @@ uint16_t Auto_Notch_Adjust = 1;      //078自動ノッチ合わせ機構
 bool EB_latch = false;               //非常ラッチ　自動帯で解除されないようにする
 bool deadman = false;                //デッドマン
 
-bool Pan_Mode = true;  //PAN 1:通電 PAN 0:停電
+bool Pan_Mode = true;        //PAN 1:通電 PAN 0:停電
+bool Accident_Mode = false;  //ACD 1:事故 0:解除
 
 bool EB_JR_move_E = false;  //非常ブレーキ
 
@@ -382,6 +384,12 @@ void loop() {
         Pan_Mode = strbve.charAt(4) == '1';
       }
 
+      //事故モード 4.2.2.2追加
+    } else if (strbve.startsWith("ACD")) {
+      if (strbve.length() > 4) {
+        Accident_Mode = strbve.charAt(4) == '1';
+      }
+
     } else if (strbve.startsWith("MD ")) {
       //模型モード
       if (strbve.indexOf("N   ") > 0) {
@@ -537,38 +545,30 @@ uint16_t adcRead(uint8_t ch) {  // 0 .. 7
 
 //MCP23S17マスコンノッチ状態読込 (MC53抑速ブレーキ対応)
 void read_MC(void) {
-  uint8_t mcBit = ioexp_1_AB;      //MCP23S17読込
-  static uint8_t mcBit_latch = 0;  //MCP23S17読込格納
-  if (mcBit != mcBit_latch) {
+  if (!Accident_Mode) {
     if (ioexp_1_AB >> PIN_MC_DEC & 1) {
       if (set_InputFlip >> 6 & 1 && deadman) {  //非常有効時
         deadman = false;
       }
+      autoair_dir_mask = false;
       if (~ioexp_1_AB >> PIN_MC_5 & 1) {
-        if ((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 4)) {
-          notch_mc = 4;
-        } else if ((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 5)) {
-          notch_mc = 5;
+        if (set_MCNotchNumConsole == 5) {
+          notch_mc = set_MCNotchNumBVE;
         }
-        autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_4 & 1) {
-        if ((set_MCNotchNumConsole == 4) && (set_MCNotchNumBVE == 5)) {
-          notch_mc = 5;
-        } else if (((set_MCNotchNumConsole == 5) && (set_MCNotchNumBVE == 5)) || ((set_MCNotchNumConsole == 4) && (set_MCNotchNumBVE == 4))) {
+        if (set_MCNotchNumConsole == 4) {
+          notch_mc = set_MCNotchNumBVE;
+        } else if (set_MCNotchNumConsole == 5) {
           notch_mc = 4;
         }
-        autoair_dir_mask = false;
       } else if (~ioexp_1_AB >> PIN_MC_3 & 1) {
         notch_mc = 3;
-        autoair_dir_mask = false;
         Serial1Print("ATSM3", false);
       } else if (~ioexp_1_AB >> PIN_MC_2 & 1) {
         notch_mc = 2;
-        autoair_dir_mask = false;
         Serial1Print("ATSM2", false);
       } else if (~ioexp_1_AB >> PIN_MC_1 & 1) {
         notch_mc = 1;
-        autoair_dir_mask = false;
         Serial1Print("ATSM1", false);
       } else {
         notch_mc = 0;
@@ -591,22 +591,31 @@ void read_MC(void) {
         deadman = true;
       } else {  //抑速有効時
         if (!autoair_dir_mask) {
-          if (~ioexp_1_AB >> PIN_MC_3 & 1 && ioexp_1_AB >> PIN_MC_4 & 1) {
-            notch_mc = -2;
-          } else if (~ioexp_1_AB >> PIN_MC_2 & 1 && ioexp_1_AB >> PIN_MC_4 & 1) {
-            notch_mc = -3;
-          } else if (~ioexp_1_AB >> PIN_MC_2 & 1 && ~ioexp_1_AB >> PIN_MC_4 & 1) {
-            notch_mc = -4;
-          } else if (~ioexp_1_AB >> PIN_MC_3 & 1 && ~ioexp_1_AB >> PIN_MC_4 & 1) {
-            notch_mc = -5;
-          } else {
-            notch_mc = -1;
+          notch_mc = -1;
+          uint8_t decBit = ~ioexp_1_AB >> 1 & B1111;
+          switch (decBit) {
+            case B0001:
+              notch_mc = -3;
+              break;
+            case B0010:
+              notch_mc = -2;
+              break;
+            case B0101:
+              notch_mc = -4;
+              break;
+            case B0110:
+              notch_mc = -5;
+              break;
+            case B1000:
+              notch_mc = -1;
+              break;
           }
         }
       }
     }
+  } else {
+    notch_mc = 0;
   }
-  mcBit_latch = mcBit;
   notch_name[0] = (notch_mc >= 0) ? 'P' : 'H';
   notch_name[1] = char(abs(notch_mc));
 }
@@ -614,11 +623,11 @@ void read_MC(void) {
 //マスコンレバーサ読取
 void read_Dir(void) {
   if (!autoair_dir_mask) {
-    if (~ioexp_1_AB >> PIN_MC_DIR_F & 1) {
+    if ((~ioexp_1_AB >> PIN_MC_DIR_F & 1) && !Accident_Mode) {
       iDir = 1;
       cDir[0] = 'F';
       cDir_N[0] = 'L';
-    } else if (~ioexp_1_AB >> PIN_MC_DIR_B & 1) {
+    } else if ((~ioexp_1_AB >> PIN_MC_DIR_B & 1) && !Accident_Mode) {
       iDir = -1;
       cDir[0] = 'B';
       cDir_N[0] = 'R';
@@ -858,7 +867,6 @@ void keyboard_control(void) {
         }
       }
     }
-    notch_mc_latch = notch_mc;
   }
 
   //ブレーキノッチ(角度)が前回と異なるとき
@@ -920,6 +928,7 @@ void keyboard_control(void) {
       }
     }
   }
+  notch_mc_latch = notch_mc;
   notch_brk_latch = notch_brk;
   notch_brk_name_latch = notch_brk_name;
   autoair_notch_brk_latch = autoair_notch_brk;
@@ -1346,7 +1355,7 @@ void BP(uint8_t *angl, String *str) {
   }
 }
 
-void BP_ER_EB_Control(unsigned long bp_millis, unsigned long er_millis) {
+void BP_ER_EB_Control(unsigned long &bp_millis, unsigned long &er_millis) {
   //BPを急減圧
   if ((millis() - bp_millis) > 20) {
     if (BP_press > 0) {
@@ -1471,6 +1480,10 @@ void read_Serial1() {
         }
       } else if (str1.startsWith("KEY")) {
         KeyPut(str1);
+      } else if (str1.startsWith("ACD")) {
+        Accident_Mode = str1.charAt(4) == '1';
+      }else{
+        Serial.println(str1);
       }
     } else {
       Serial.println(str1);
@@ -1562,7 +1575,7 @@ void send_Serial1(String &str) {
   Serial1.print('\r');
 }
 
-void set_Settings(uint8_t device, int16_t num) {
+void set_Settings(uint8_t &device, int16_t &num) {
   String s = "";
   switch (device) {
     //緩め位置設定
@@ -1687,7 +1700,7 @@ void set_Settings(uint8_t device, int16_t num) {
   Serial.println(s);
 }
 
-void setStringAt(uint8_t startIndex, String &str, uint16_t value) {
+void setStringAt(uint8_t startIndex, String &str, uint16_t &value) {
   uint16_t d[3];
   d[0] = value / 100 + 0x30;
   d[1] = value / 10 % 10 + 0x30;
