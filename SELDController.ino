@@ -72,6 +72,7 @@
 //V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_DECの判定のみ)
 //V4.2.2.1 ブレーキ弁EB入力対応、ATSMxコマンドの修正
 //V4.2.2.2 事故モードを追加、マスコン、レバーサ無効、抑速段処理軽量化、Serial1→USB通信修正
+//V4.2.2.3 模型モード(modeN)トグルスイッチ修正、キーボード処理、マスコン処理周辺軽量化
 
 /*set_InputFlip
   1bit:警報持続
@@ -87,7 +88,6 @@
 #include <Adafruit_MCP4725.h>
 #include <EEPROM.h>
 #include <Wire.h>
-
 #include <Keyboard.h>
 
 //#define SIMPLE MCP3008およびMCP4725を使用しない定義用
@@ -226,6 +226,7 @@ bool Accident_Mode = false;  //ACD 1:事故 0:解除
 
 bool EB_JR_move_E = false;  //非常ブレーキ
 
+String tmp_ser1_s = "";
 
 void setup() {
   pinMode(SS_Brk, OUTPUT);   //MCP3008
@@ -243,7 +244,7 @@ void setup() {
   pinMode(9, INPUT_PULLUP);   //ATS
   pinMode(10, INPUT_PULLUP);  //予備
   pinMode(11, INPUT_PULLUP);  //予備SW1
-  pinMode(12, INPUT_PULLUP);  //予備SW2
+  pinMode(12, INPUT_PULLUP);  //BVE模型切替SW BVE:1 模型:0
 
   Serial.begin(115200);
   Serial1.begin(115200);
@@ -256,14 +257,14 @@ void setup() {
 
   Keyboard.begin();
 
-  if (!mcp.begin_SPI(SS_Mc)) {
-    Serial.println("Error.");
-  } else {
+  if (mcp.begin_SPI(SS_Mc)) {
     // マスコンスイッチを全てプルアップ
     for (uint8_t i = 0; i < 16; i++) {
       mcp.pinMode(i, INPUT_PULLUP);
     }
-  }
+  } /*else{
+Serial.println("Error.");
+  }*/
 
   //初回書き込みチェック
   int16_t b = 0;
@@ -352,6 +353,14 @@ void loop() {
   read_Serial1();
   read_USB(strbve);
 
+  bool tmp_mode_n = !digitalRead(12);  //BVE模型切替SW BVE:1 模型:0
+  static bool tmp_mode_n_latch = tmp_mode_n;
+  if (tmp_mode_n != tmp_mode_n_latch) {
+    modeN = !tmp_mode_n;
+    modeBVE = tmp_mode_n;
+    tmp_mode_n_latch = tmp_mode_n;
+  }
+
   if (strbve != strbve_latch) {
     uint8_t i = 0;
     String s = "";
@@ -384,7 +393,7 @@ void loop() {
         Pan_Mode = strbve.charAt(4) == '1';
       }
 
-      //事故モード 4.2.2.2追加
+      //事故モード 4.2.2.2追加 マスコンレバーサ無効
     } else if (strbve.startsWith("ACD")) {
       if (strbve.length() > 4) {
         Accident_Mode = strbve.charAt(4) == '1';
@@ -459,18 +468,18 @@ void loop() {
     strbve_latch = strbve;
   }
 
-  read_IOexp();          //IOエキスパンダ読込ルーチン
-  read_Light_Def();      //減光ライト読込ルーチン
-  read_Light();          //前照灯読込ルーチン
-  read_MC();             //マスコンノッチ読込ルーチン
-  read_Dir();            //マスコンレバーサ読込ルーチン
-  read_Break(&strbve);   //ブレーキハンドル読込ルーチン
-  read_Break_Setting();  //ブレーキハンドル読込ルーチン(未実装)
-  read_Horn();           //ホーンペダル読込ルーチン
-  read_Ats();            //ATS確認・警報持続読込ルーチン
-  read_Panto();          //強制終了ルーチン
-  read_EB();             //EBスイッチ読込ルーチン
-  keyboard_control();    //キーボード(HID)アウトプットルーチン
+  read_IOexp();              //IOエキスパンダ読込ルーチン
+  read_Light_Def();          //減光ライト読込ルーチン
+  read_Light();              //前照灯読込ルーチン
+  read_MC();                 //マスコンノッチ読込ルーチン
+  read_Dir();                //マスコンレバーサ読込ルーチン
+  read_Break(&strbve);       //ブレーキハンドル読込ルーチン
+  read_Break_Setting();      //ブレーキハンドル読込ルーチン(未実装)
+  read_Horn();               //ホーンペダル読込ルーチン
+  read_Ats();                //ATS確認・警報持続読込ルーチン
+  read_Panto();              //強制終了ルーチン
+  read_EB();                 //EBスイッチ読込ルーチン
+  keyboard_control(strbve);  //キーボード(HID)アウトプットルーチン
 
   //圧力値が変動時、下位および上位に伝送
   if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
@@ -558,21 +567,17 @@ void read_MC(void) {
       } else if (~ioexp_1_AB >> PIN_MC_4 & 1) {
         if (set_MCNotchNumConsole == 4) {
           notch_mc = set_MCNotchNumBVE;
-        } else if (set_MCNotchNumConsole == 5) {
+        } else if (set_MCNotchNumConsole == 5 && set_MCNotchNumBVE != 4) {
           notch_mc = 4;
         }
       } else if (~ioexp_1_AB >> PIN_MC_3 & 1) {
         notch_mc = 3;
-        Serial1Print("ATSM3", false);
       } else if (~ioexp_1_AB >> PIN_MC_2 & 1) {
         notch_mc = 2;
-        Serial1Print("ATSM2", false);
       } else if (~ioexp_1_AB >> PIN_MC_1 & 1) {
         notch_mc = 1;
-        Serial1Print("ATSM1", false);
       } else {
         notch_mc = 0;
-        Serial1Print("ATSM0", false);
         //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
         if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle && use_AutoAirBrake && !use_BveEX) {
           if (!modeN) {
@@ -796,9 +801,9 @@ uint16_t read_Break(String *str) {
         autoair_dir_mask = false;
         EB_latch = true;
       }
-      if (notch_BrakeAAB != notch_BrakeAAB_latch && !mode_TS185) {
-        Serial.print("AAB ");
-        Serial.println(notch_BrakeAAB);
+      if ((notch_BrakeAAB != notch_BrakeAAB_latch) && !mode_TS185 && use_BveEX) {
+        //Serial.print();
+        Serial.println("AAB " + String(notch_BrakeAAB, BIN));
       }
       notch_BrakeAAB_latch = notch_BrakeAAB;
       brk_angl_latch = brk_angl;
@@ -822,7 +827,7 @@ uint16_t read_Break(String *str) {
 }
 
 //キーボード(HID)出力
-void keyboard_control(void) {
+void keyboard_control(String &str) {
   //マスコンノッチが前回と異なるとき
   static int8_t notch_mc_latch = notch_mc;
   if (notch_mc != notch_mc_latch) {
@@ -851,35 +856,29 @@ void keyboard_control(void) {
           }
         }
       }
-      if (modeN) {
-        if (notch_brk == 0) {
-          Serial.println(notch_name);
-        }
-        bool mc_DEC = ioexp_1_AB >> PIN_MC_DEC & 1;
-        static bool mc_DEC_latch = mc_DEC;
-        if (mc_DEC != mc_DEC_latch) {
-          if (!mc_DEC) {
-            Serial.println("Co");
-          } else {
-            Serial.println("N ");
-          }
-          mc_DEC_latch = mc_DEC;
-        }
+    }
+    if (notch_mc >= 0 && notch_mc <= 3) {
+      tmp_ser1_s = "ATSM" + String(notch_mc);
+      Serial1Print(tmp_ser1_s, false);
+    }
+    if (modeN) {
+      if (notch_brk == 0) {
+        Serial.print(notch_name[0]);
+        Serial.println(abs(notch_mc));
       }
     }
   }
 
   //ブレーキノッチ(角度)が前回と異なるとき
   if (notch_brk != notch_brk_latch || notch_brk_name != notch_brk_name_latch) {
-    if (modeBVE && !modeN) {
-      uint8_t d = abs(notch_brk - notch_brk_latch);
-      //ブレーキノッチ
-      //if (notch_brk <= (set_BrakeNotchNum + 1) && notch_brk_latch <= (set_BrakeNotchNum + 1) && notch_brk > 0) {
-      if (notch_brk >= 0 && notch_brk_latch >= 0 && notch_brk < (set_BrakeNotchNum + 1)) {
-        for (uint8_t i = 0; i < d; i++) {
-          //戻し
-          //if ((notch_brk - notch_brk_latch) > 0) {
-          if ((notch_brk - notch_brk_latch) < 0) {
+    uint8_t d = abs(notch_brk - notch_brk_latch);
+    //ブレーキノッチ
+    if (notch_brk >= 0 && notch_brk_latch >= 0 && notch_brk < (set_BrakeNotchNum + 1)) {
+      for (uint8_t i = 0; i < d; i++) {
+        //戻し
+        //if ((notch_brk - notch_brk_latch) > 0) {
+        if ((notch_brk - notch_brk_latch) < 0) {
+          if (modeBVE && !modeN) {
             if (!mode_TS185) {
               Keyboard.write(',');
             } else {
@@ -887,9 +886,11 @@ void keyboard_control(void) {
             }
           }
         }
-        //ブレーキ
-        //if ((notch_brk - notch_brk_latch) < 0) {
-        if ((notch_brk - notch_brk_latch) > 0) {
+      }
+      //ブレーキ
+      //if ((notch_brk - notch_brk_latch) < 0) {
+      if ((notch_brk - notch_brk_latch) > 0) {
+        if (modeBVE && !modeN) {
           if (!mode_TS185) {
             Keyboard.write('.');
           } else {
@@ -897,9 +898,20 @@ void keyboard_control(void) {
           }
         }
       }
-      //非常
-      if (notch_brk == set_BrakeNotchNum + 1) {
-        Keyboard.write('/');
+    }
+    //非常
+    static bool EB_serial_write = false;
+    bool condition = notch_brk == set_BrakeNotchNum + 1;
+    Keyboard_Press_Release_BVE(condition, '/');
+    if (condition) {
+      str.setCharAt(36, '1');
+      send_Serial1(str);
+      EB_serial_write = true;
+    } else {
+      if (EB_serial_write) {
+        str.setCharAt(36, '0');
+        send_Serial1(str);
+        EB_serial_write = false;
       }
     }
     if (modeN) {
@@ -1013,25 +1025,13 @@ void read_Horn(void) {
   }
   static bool Horn_1_latch = Horn_1;
   if (Horn_1 != Horn_1_latch) {
-    if (Horn_1) {
-      if (modeBVE) {
-        if (!mode_TS185) {
-          Keyboard.press(0xB0);  //"Enter"
-        } else {
-          Keyboard.press(KEY_BACKSPACE);
-        }
-      }
+    if (!mode_TS185) {
+      Keyboard_Press_Release_BVE(Horn_1, 0xB0);  //Enter
     } else {
-      if (modeBVE) {
-        if (!mode_TS185) {
-          Keyboard.release(0xB0);
-        } else {
-          Keyboard.release(KEY_BACKSPACE);
-        }
-      }
+      Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);
     }
+    Horn_1_latch = Horn_1;
   }
-  Horn_1_latch = Horn_1;
 
   bool Horn_2 = ~ioexp_1_AB >> PIN_HORN_2 & 1;  //警笛2
   if (set_InputFlip >> 5 & 1) {
@@ -1039,15 +1039,7 @@ void read_Horn(void) {
   }
   static bool Horn_2_latch = Horn_2;
   if (Horn_2 != Horn_2_latch) {
-    if (Horn_2) {
-      if (modeBVE) {
-        Keyboard.press(0xDF);  //"Enter"
-      }
-    } else {
-      if (modeBVE) {
-        Keyboard.release(0xDF);
-      }
-    }
+    Keyboard_Press_Release_BVE(Horn_2, 0xDF);  //Enter
     Horn_2_latch = Horn_2;
   }
 }
@@ -1064,27 +1056,27 @@ void read_Ats(void) {
     Ats_In_Count_On = 0;
   }
   if (Ats_In_Count_On > 10) {
+    Ats_In_Count_On = 10;
     Ats_Pos = true;
   } else if (Ats_In_Count_Off > 10) {
+    Ats_In_Count_Off = 10;
     Ats_Pos = false;
   }
 
   //ATS確認位置転送
   if (use_AtsContact) {
-    if (Ats_Pos && !Ats_Pos_latch) {
-      Serial1Print("ATS 1", true);
-    } else if (!Ats_Pos && Ats_Pos_latch) {
-      Serial1Print("ATS 0", true);
+    if (Ats_Pos != Ats_Pos_latch) {
+      tmp_ser1_s = "ATS " + String(Ats_Pos);
+      Serial1Print(tmp_ser1_s, true);
     }
+    Ats_Pos_latch = Ats_Pos;
   }
-  Ats_Pos_latch = Ats_Pos;
 
   //EB
-  bool EB_In = (adcRead(4) < 1);
   static uint8_t EB_In_Count_On = 0;
   static uint8_t EB_In_Count_Off = 0;
   static bool EB_Pos = false;
-  if (EB_In) {
+  if (adcRead(4) < 1) {
     EB_In_Count_On++;
     EB_In_Count_Off = 0;
   } else {
@@ -1114,17 +1106,9 @@ void read_Ats(void) {
   }
   static bool Ats_Cont_latch = Ats_Cont;  //警報持続スイッチ
   if (Ats_Cont != Ats_Cont_latch) {
-    if (Ats_Cont) {
-      if (modeBVE) {
-        Serial1Print("ACT 1", true);
-        Keyboard.press(0xD1);  //"Insert"
-      }
-    } else {
-      if (modeBVE) {
-        Serial1Print("ACT 0", true);
-        Keyboard.release(0xD1);
-      }
-    }
+    tmp_ser1_s = "ACT " + String(Ats_Cont);
+    Serial1Print(tmp_ser1_s, true);
+    Keyboard_Press_Release_BVE(Ats_Cont, 0xD1);  //"Insert"
     Ats_Cont_latch = Ats_Cont;
   }
 
@@ -1133,21 +1117,12 @@ void read_Ats(void) {
   if (Ats_Conf_flip) {
     Ats_Conf = !Ats_Conf;
   }
+  Ats_Conf &= Ats_Pos;
   static bool Ats_Conf_latch = Ats_Conf;  //ATS確認ボタン
   if (Ats_Conf != Ats_Conf_latch) {
-    if (Ats_Conf) {
-      if (modeBVE) {
-        if (Ats_Pos) {
-          Serial1Print("ACF 1", true);
-          Keyboard.press(0x20);  //"Space"
-        }
-      }
-    } else {
-      if (modeBVE) {
-        Serial1Print("ACF 0", true);
-        Keyboard.release(0x20);
-      }
-    }
+    tmp_ser1_s = "ACF " + String(Ats_Conf);
+    Serial1Print(tmp_ser1_s, true);
+    Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space
     Ats_Conf_latch = Ats_Conf;
   }
 
@@ -1158,15 +1133,7 @@ void read_Ats(void) {
   }
   static bool Ats_Rec_latch = Ats_Rec;
   if (Ats_Rec != Ats_Rec_latch) {
-    if (Ats_Rec) {
-      if (modeBVE) {
-        Keyboard.press(0xD2);  //"Home"
-      }
-    } else {
-      if (modeBVE) {
-        Keyboard.release(0xD2);
-      }
-    }
+    Keyboard_Press_Release_BVE(Ats_Rec, 0xD2);  //Home
     Ats_Rec_latch = Ats_Rec;
   }
 }
@@ -1175,16 +1142,8 @@ void read_Panto(void) {
   bool Panto = ~ioexp_1_AB >> PIN_PANTO & 1;
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
-    if (Panto) {
-      if (modeBVE) {
-        Keyboard.press(0x82);  //"Alt"
-        Keyboard.press(0xC5);  //"F4"
-      }
-    } else {
-      if (modeBVE) {
-        Keyboard.releaseAll();
-      }
-    }
+    Keyboard_Press_Release_BVE(Panto, 0x82);  //Alt
+    Keyboard_Press_Release_BVE(Panto, 0xC5);  //F4
     Panto_latch = Panto;
   }
 }
@@ -1218,17 +1177,9 @@ void read_EB(void) {
   if (set_InputFlip >> 3 & 1) {
     EB_SW = !EB_SW;
   }
-  static bool EB_SW_latch = 0;
+  static bool EB_SW_latch = false;
   if (EB_SW != EB_SW_latch) {
-    if (EB_SW) {
-      if (modeBVE) {
-        Keyboard.press(KEY_DELETE);  //"Delete"
-      }
-    } else {
-      if (modeBVE) {
-        Keyboard.release(KEY_DELETE);  //"Delete"
-      }
-    }
+    Keyboard_Press_Release_BVE(EB_SW, KEY_DELETE);  //Delete
     EB_SW_latch = EB_SW;
   }
 }
@@ -1316,16 +1267,19 @@ void BP(uint8_t *angl, String *str) {
         press_BC_Sim = 490;
       }
     }
-  }
-
-  //自動帯使用時に圧力をノッチに変換(BveEXを使用しない場合に限る)
-  //BveEX使用時、ノッチはB0固定
-  //if (!use_BveEX) {
-  //BC圧からブレーキノッチに変換
-  if (EB_latch) {
-    autoair_notch_brk = set_BrakeNotchNum + 1;
   } else {
-    autoair_notch_brk = map(press_BC_Sim, 0, 440, 0, set_BrakeNotchNum);
+    press_BC_Sim = BC_press;
+  }  ////////
+
+  //自動帯使用時に圧力をノッチに変換(BveEXを使用しない場合)
+  //BveEX使用時、ノッチはB0固定
+  if (!use_BveEX) {
+    //BC圧からブレーキノッチに変換
+    if (EB_latch) {
+      autoair_notch_brk = set_BrakeNotchNum + 1;
+    } else {
+      autoair_notch_brk = map(press_BC_Sim, 0, 440, 0, set_BrakeNotchNum);
+    }
   }
   //自動帯圧力優先シーケンス
   //N位置
@@ -1412,13 +1366,13 @@ void AutoNotch(String &str) {
         } else if (str.charAt(44) == 'B') {
           bve_rev = -1;
         }
-        String bve_brk = str.substring(48, 50);
         char Buf[4];
-        bve_brk.toCharArray(Buf, 4);
+        Buf[0] = str.charAt(48);
+        Buf[1] = str.charAt(49);
+        Buf[2] = str.charAt(50);
         uint8_t num = strtol(Buf, NULL, 16);  //16進数→10進数に変換
         if (!autoair_dir_mask) {
           iDir_latch = bve_rev;
-          //notch_brk_latch = (set_BrakeNotchNum + 1) - num;
           notch_brk_latch = num;
         }
       }
@@ -1482,7 +1436,7 @@ void read_Serial1() {
         KeyPut(str1);
       } else if (str1.startsWith("ACD")) {
         Accident_Mode = str1.charAt(4) == '1';
-      }else{
+      } else {
         Serial.println(str1);
       }
     } else {
@@ -1514,7 +1468,8 @@ void send_Serial1(String &str) {
       //"0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440E490S440P490/";
       BC_press = press_BC_Sim;  //BCの演算結果を代入
 
-      //現在BC圧よりもBVEからのBC圧が高い場合はBVEを優先する
+      //現在BC圧よりもBVEからのBC圧が高い場合はBVEを優先し
+      //逆の場合で直通帯のときBVEの圧力を優先する
       if (bve_BC_press > BC_press) {
         if (!sap_auto_mask) {
           BC_press = bve_BC_press;
@@ -1571,6 +1526,11 @@ void send_Serial1(String &str) {
       setStringAt(63, str, sap_press_latch);
     }
   }
+  //非常
+  if (notch_brk == set_BrakeNotchNum + 1) {
+    str.setCharAt(36, '1');
+  }
+
   Serial1.print(str);
   Serial1.print('\r');
 }
@@ -1713,7 +1673,7 @@ void setStringAt(uint8_t startIndex, String &str, uint16_t &value) {
   }
 }
 
-void Serial1Print(String command, bool monitor) {
+void Serial1Print(String &command, bool monitor) {
   Serial1.print(command);
   Serial1.print('\r');
   if (monitor) {
@@ -1730,6 +1690,16 @@ void KeyPut(String &str) {
     } else {
       char c = str.charAt(4);
       Keyboard.write(c);
+    }
+  }
+}
+
+void Keyboard_Press_Release_BVE(bool &condition, byte keycode) {
+  if (modeBVE) {
+    if (condition) {
+      Keyboard.press(keycode);
+    } else {
+      Keyboard.release(keycode);
     }
   }
 }
