@@ -73,6 +73,7 @@
 //V4.2.2.1 ブレーキ弁EB入力対応、ATSMxコマンドの修正
 //V4.2.2.2 事故モードを追加、マスコン、レバーサ無効、抑速段処理軽量化、Serial1→USB通信修正
 //V4.2.2.3 模型モード(modeN)トグルスイッチ修正、キーボード処理、マスコン処理周辺軽量化
+//V4.2.2.4 模型モード修正、キーボード処理、マスコン処理周辺軽量化
 
 /*set_InputFlip
   1bit:警報持続
@@ -332,7 +333,8 @@ Serial.println("Error.");
     EEPROM.get(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
     EEPROM.get(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
   }
-
+  modeN = digitalRead(12);
+  modeBVE = !modeN;
   //速度計テスト
   disp_SpeedMeter(set_SpeedLimit * 10);
   delay(1500);
@@ -407,10 +409,12 @@ void loop() {
           int16_t num = strbve.substring(7, 12).toInt();
           if (num) {
             modeN = true;
+            modeBVE = false;
             set_BrakeNotchNum = 8;
             s += "ON";
           } else {
             modeN = false;
+            modeBVE = false;
             s += "OFF";
           }
         }
@@ -484,8 +488,8 @@ void loop() {
   //圧力値が変動時、下位および上位に伝送
   if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
     send_Serial1(strbve);
-    //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、Nモードでない)はBCの変化時にPCへ伝送
-    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && !modeN) {
+    //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、modeBVEのとき)はBCの変化時にPCへ伝送
+    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && modeBVE) {
       if (BC_press != BC_press_latch) {
         Serial.print("BC ");
         Serial.println(BC_press);
@@ -579,11 +583,8 @@ void read_MC(void) {
       } else {
         notch_mc = 0;
         //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
-        if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle && use_AutoAirBrake && !use_BveEX) {
-          if (!modeN) {
-            autoair_dir_mask = true;
-            iDir = 0;
-          }
+        if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle) {
+          AutoAirMask();
         }
       }
     } else {
@@ -595,7 +596,7 @@ void read_MC(void) {
         autoair_dir_mask = false;
         deadman = true;
       } else {  //抑速有効時
-        if (!autoair_dir_mask) {
+        if (!autoair_dir_mask) {//自動ブレーキ使用時は抑速使用不可
           notch_mc = -1;
           uint8_t decBit = ~ioexp_1_AB >> 1 & B1111;
           switch (decBit) {
@@ -639,6 +640,7 @@ void read_Dir(void) {
     } else {
       iDir = 0;
       cDir[0] = 'N';
+      cDir_N[0] = 'N';
     }
   }
 }
@@ -683,7 +685,7 @@ uint16_t read_Break(String *str) {
       if (brk_angl < 10) {
         Serial.print('0');
       }
-      Serial.print(brk_angl);
+      Serial.println(brk_angl);
     }
 
     static uint8_t brk_angl_latch = brk_angl;
@@ -715,7 +717,8 @@ uint16_t read_Break(String *str) {
           autoair_dir_mask = false;
           notch_BrakeAAB = false;
         }
-        notch_brk_name = 'B' + String(notch_brk);
+        notch_brk_name = "B";
+        notch_brk_name += notch_brk;
       }
 
       //自動帯の処理
@@ -736,16 +739,7 @@ uint16_t read_Break(String *str) {
             }
             notch_BrakeAAB = true;
             notch_brk_name = "A0";
-            //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-            if (notch_mc == 0) {
-              if (!modeN && !use_BveEX) {
-                autoair_dir_mask = true;
-                iDir = 0;
-              }
-              //マスコンノッチが0以外の時はレバーサマスクをfalse
-            } else {
-              autoair_dir_mask = false;
-            }
+            AutoAirMask();
 
             //自動帯減圧位置(弱)
           } else if (brk_angl < set_BrakeAutoAir2Angle) {
@@ -756,15 +750,7 @@ uint16_t read_Break(String *str) {
                 Keyboard.press('.');
               }
               //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-              if (notch_mc == 0) {
-                if (!modeN && !use_BveEX && !mode_TS185) {
-                  autoair_dir_mask = true;
-                  iDir = 0;
-                }
-                //マスコンノッチが0以外の時はレバーサマスクをfalse
-              } else {
-                autoair_dir_mask = false;
-              }
+              AutoAirMask();
             }
             //自動帯減圧位置(強)
           } else {
@@ -774,16 +760,7 @@ uint16_t read_Break(String *str) {
               if (mode_TS185) {
                 Keyboard.press('.');
               }
-              //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-              if (notch_mc == 0) {
-                if (!modeN && !use_BveEX && !mode_TS185) {
-                  autoair_dir_mask = true;
-                  iDir = 0;
-                }
-                //マスコンノッチが0以外の時はレバーサマスクをfalse
-              } else {
-                autoair_dir_mask = false;
-              }
+              AutoAirMask();
             }
           }
           //自動帯非使用時は直通帯常用最大扱い
@@ -803,7 +780,8 @@ uint16_t read_Break(String *str) {
       }
       if ((notch_BrakeAAB != notch_BrakeAAB_latch) && !mode_TS185 && use_BveEX) {
         //Serial.print();
-        Serial.println("AAB " + String(notch_BrakeAAB, BIN));
+        Serial.print("AAB ");
+        Serial.println(notch_BrakeAAB, BIN);
       }
       notch_BrakeAAB_latch = notch_BrakeAAB;
       brk_angl_latch = brk_angl;
@@ -820,7 +798,7 @@ uint16_t read_Break(String *str) {
       Serial.print(" BP: ");
       Serial.print(BP_press);
       Serial.print(" BP_notch: ");
-      Serial.println(autoair_notch_brk);
+      Serial.print(autoair_notch_brk);
     }
     adc_latch = adc;
   }
@@ -856,15 +834,15 @@ void keyboard_control(String &str) {
           }
         }
       }
-    }
-    if (notch_mc >= 0 && notch_mc <= 3) {
-      tmp_ser1_s = "ATSM" + String(notch_mc);
-      Serial1Print(tmp_ser1_s, false);
-    }
-    if (modeN) {
-      if (notch_brk == 0) {
-        Serial.print(notch_name[0]);
-        Serial.println(abs(notch_mc));
+      if (notch_mc >= 0 && notch_mc <= 3) {
+        tmp_ser1_s = "ATSM";
+        tmp_ser1_s += notch_mc;
+        Serial1Print(tmp_ser1_s, false);
+      }
+      //modeN
+    } else {
+      if (notch_brk == 0) {  //ブレーキ緩解
+        Serial1Print(String(notch_name[0]) + String(abs(notch_mc)), true);
       }
     }
   }
@@ -876,9 +854,8 @@ void keyboard_control(String &str) {
     if (notch_brk >= 0 && notch_brk_latch >= 0 && notch_brk < (set_BrakeNotchNum + 1)) {
       for (uint8_t i = 0; i < d; i++) {
         //戻し
-        //if ((notch_brk - notch_brk_latch) > 0) {
         if ((notch_brk - notch_brk_latch) < 0) {
-          if (modeBVE && !modeN) {
+          if (modeBVE) {
             if (!mode_TS185) {
               Keyboard.write(',');
             } else {
@@ -888,9 +865,8 @@ void keyboard_control(String &str) {
         }
       }
       //ブレーキ
-      //if ((notch_brk - notch_brk_latch) < 0) {
       if ((notch_brk - notch_brk_latch) > 0) {
-        if (modeBVE && !modeN) {
+        if (modeBVE) {
           if (!mode_TS185) {
             Keyboard.write('.');
           } else {
@@ -915,13 +891,13 @@ void keyboard_control(String &str) {
       }
     }
     if (modeN) {
-      Serial.println(notch_brk_name);
+      Serial1Print(notch_brk_name, true);
     }
   }
 
   //レバーサが前回と異なるとき
   if (iDir != iDir_latch) {
-    if (modeBVE && !modeN) {
+    if (modeBVE) {
       uint8_t d = abs(iDir - iDir_latch);
       for (uint8_t i = 0; i < d; i++) {
         //前進
@@ -932,12 +908,9 @@ void keyboard_control(String &str) {
           Keyboard.write(0xD9);  //"↓"
         }
       }
-    }
-    if (modeN) {
-      if (iDir != 0) {
-        Serial.print(cDir_N[0]);
-        Serial.println(cDir_N[1]);
-      }
+    } else {
+      //modeN
+      Serial1Print(String(cDir_N[0]) + String(cDir_N[1]), true);
     }
   }
   notch_mc_latch = notch_mc;
@@ -1066,7 +1039,8 @@ void read_Ats(void) {
   //ATS確認位置転送
   if (use_AtsContact) {
     if (Ats_Pos != Ats_Pos_latch) {
-      tmp_ser1_s = "ATS " + String(Ats_Pos);
+      tmp_ser1_s = "ATS ";
+      tmp_ser1_s += String(Ats_Pos);
       Serial1Print(tmp_ser1_s, true);
     }
     Ats_Pos_latch = Ats_Pos;
@@ -1106,7 +1080,8 @@ void read_Ats(void) {
   }
   static bool Ats_Cont_latch = Ats_Cont;  //警報持続スイッチ
   if (Ats_Cont != Ats_Cont_latch) {
-    tmp_ser1_s = "ACT " + String(Ats_Cont);
+    tmp_ser1_s = "ACT ";
+    tmp_ser1_s += String(Ats_Cont);
     Serial1Print(tmp_ser1_s, true);
     Keyboard_Press_Release_BVE(Ats_Cont, 0xD1);  //"Insert"
     Ats_Cont_latch = Ats_Cont;
@@ -1120,7 +1095,8 @@ void read_Ats(void) {
   Ats_Conf &= Ats_Pos;
   static bool Ats_Conf_latch = Ats_Conf;  //ATS確認ボタン
   if (Ats_Conf != Ats_Conf_latch) {
-    tmp_ser1_s = "ACF " + String(Ats_Conf);
+    tmp_ser1_s = "ACF ";
+    tmp_ser1_s += String(Ats_Conf);
     Serial1Print(tmp_ser1_s, true);
     Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space
     Ats_Conf_latch = Ats_Conf;
@@ -1350,32 +1326,27 @@ String rw_eeprom(uint16_t dev, uint16_t *n, uint16_t *param, bool write, bool NG
     s += " ";
     s += *param;
   } else {
-    s = "E1 " + dev;
+    s = "E1 ";
+    s += dev;
   }
   return s;
 }
 
 //ノッチ自動調整 BVEからの入力に対して現在状態の比較を行い、ラッチに格納することでメインループで自動的に修正する
 void AutoNotch(String &str) {
-  if (str.length() > 49) {
-    if (Auto_Notch_Adjust) {
-      if (str.charAt(47) == 'B') {
-        int bve_rev = 0;
-        if (str.charAt(44) == 'F') {
-          bve_rev = 1;
-        } else if (str.charAt(44) == 'B') {
-          bve_rev = -1;
-        }
-        char Buf[4];
-        Buf[0] = str.charAt(48);
-        Buf[1] = str.charAt(49);
-        Buf[2] = str.charAt(50);
-        uint8_t num = strtol(Buf, NULL, 16);  //16進数→10進数に変換
-        if (!autoair_dir_mask) {
-          iDir_latch = bve_rev;
-          notch_brk_latch = num;
-        }
+  if (str.length() > 49 && Auto_Notch_Adjust && !autoair_dir_mask) {
+    if (str.charAt(47) == 'B') {
+      int bve_rev = 0;
+      if (str.charAt(44) == 'F') {
+        iDir_latch = 1;
+      } else if (str.charAt(44) == 'B') {
+        iDir_latch = -1;
       }
+      char Buf[4];
+      Buf[0] = str.charAt(48);
+      Buf[1] = str.charAt(49);
+      Buf[2] = str.charAt(50);
+      notch_brk_latch = strtol(Buf, NULL, 16);  //16進数→10進数に変換
     }
   }
 }
@@ -1701,5 +1672,17 @@ void Keyboard_Press_Release_BVE(bool &condition, byte keycode) {
     } else {
       Keyboard.release(keycode);
     }
+  }
+}
+
+void AutoAirMask() {
+  //マスコンノッチが0、BVEモード時でBveEXモード以外とTS185以外のとき、
+  //レバーサ0、レバーサマスクをtrue
+  if (use_AutoAirBrake && notch_mc <= 0 && modeBVE && !use_BveEX && !mode_TS185) {
+    autoair_dir_mask = true;
+    iDir = 0;
+    //マスコンノッチが0以外の時はレバーサマスクをfalse
+  } else {
+    autoair_dir_mask = false;
   }
 }
