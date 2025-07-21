@@ -77,13 +77,14 @@
 //V4.2.2.5 USB入力とSerial入力判定部を共通化
 
 /*set_InputFlip
-  1bit:警報持続
-  (2bit:ATS確認ボタン)
-  (3bit:ATS復帰ボタン未実装) 
-  4bit:EB
-  5bit:警笛1
-  6bit:警笛2
+  1bit:警報持続 0:A接点 1:B接点
+  (2bit:ATS確認ボタン) 0:A接点 1:B接点
+  3bit:ATS復帰ボタン 0:A接点 1:B接点 
+  4bit:EB 0:A接点 1:B接点
+  5bit:警笛1 0:A接点 1:B接点
+  6bit:警笛2 0:A接点 1:B接点
   7bit:抑速 0:抑速 1:非常
+  8bit:メーター確認 0:実行 2:なし
   */
 
 #include <Adafruit_MCP23X17.h>
@@ -348,8 +349,10 @@ Serial.println("Error.");
   modeN = digitalRead(PIN_BVE_MODE);
   modeBVE = !modeN;
   //速度計テスト
-  disp_SpeedMeter(set_SpeedLimit * 10);
-  delay(1500);
+  if (!(set_InputFlip >> 7 & 1)) {
+    disp_SpeedMeter(set_SpeedLimit * 10);
+    delay(1500);
+  }
   disp_SpeedMeter(0);
 }
 
@@ -1000,27 +1003,27 @@ void read_Break_Setting(void) {
 }
 
 void read_Horn(void) {
-  bool Horn_1 = ~ioexp_1_AB >> PIN_HORN_1 & 1;  //警笛1
-  if (set_InputFlip >> 4 & 1) {
-    Horn_1 = !Horn_1;
-  }
+  bool Horn_1 = (~ioexp_1_AB >> PIN_HORN_1 & 1) ^ (set_InputFlip >> 4 & 1);  //警笛1
   static bool Horn_1_latch = Horn_1;
   if (Horn_1 != Horn_1_latch) {
     if (!mode_TS185) {
-      Keyboard_Press_Release_BVE(Horn_1, 0xB0);  //Enter
+      Keyboard_Press_Release_BVE(Horn_1, KEY_RETURN);  //Enter:0xB0
     } else {
-      Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);
+      Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);  //BackSpace:0xB2
     }
+    tmp_ser1_s = "HN1 ";
+    tmp_ser1_s += String(Horn_1);
+    Serial1Print(tmp_ser1_s, false);  //モニターしない
     Horn_1_latch = Horn_1;
   }
 
-  bool Horn_2 = ~ioexp_1_AB >> PIN_HORN_2 & 1;  //警笛2
-  if (set_InputFlip >> 5 & 1) {
-    Horn_2 = !Horn_2;
-  }
+  bool Horn_2 = (~ioexp_1_AB >> PIN_HORN_2 & 1) ^ (set_InputFlip >> 5 & 1);  //警笛2
   static bool Horn_2_latch = Horn_2;
   if (Horn_2 != Horn_2_latch) {
-    Keyboard_Press_Release_BVE(Horn_2, 0xDF);  //Enter
+    Keyboard_Press_Release_BVE(Horn_2, KEY_KP_PLUS);  //+:0xDF
+    tmp_ser1_s = "HN2 ";
+    tmp_ser1_s += String(Horn_2);
+    Serial1Print(tmp_ser1_s, false);  //モニターしない
     Horn_2_latch = Horn_2;
   }
 }
@@ -1070,43 +1073,32 @@ void read_Ats(void) {
   }
 
   //ATS警報持続
-  bool Ats_Cont = ~ioexp_1_AB >> PIN_ATS_CONT & 1;  //警報持続スイッチ
-  //ATS警報持続
-  if (set_InputFlip & 1) {
-    Ats_Cont = !Ats_Cont;
-  }
-  static bool Ats_Cont_latch = Ats_Cont;  //警報持続スイッチ
+  bool Ats_Cont = (~ioexp_1_AB >> PIN_ATS_CONT & 1) ^ (set_InputFlip & 1);  //警報持続スイッチ
+  static bool Ats_Cont_latch = Ats_Cont;                                    //警報持続スイッチ
   if (Ats_Cont != Ats_Cont_latch) {
     tmp_ser1_s = "ACT ";
     tmp_ser1_s += String(Ats_Cont);
     Serial1Print(tmp_ser1_s, true);
-    Keyboard_Press_Release_BVE(Ats_Cont, 0xD1);  //"Insert"
+    Keyboard_Press_Release_BVE(Ats_Cont, KEY_INSERT);  //Insert:0xD1
     Ats_Cont_latch = Ats_Cont;
   }
 
   //ATS確認
-  bool Ats_Conf = ~ioexp_1_AB >> PIN_ATS_CONF & 1;  //ATS確認ボタン
-  if (Ats_Conf_flip) {
-    Ats_Conf = !Ats_Conf;
-  }
-  Ats_Conf &= Ats_Pos;
-  static bool Ats_Conf_latch = Ats_Conf;  //ATS確認ボタン
-  if (Ats_Conf != Ats_Conf_latch) {digitalRead
+  bool Ats_Conf = (~ioexp_1_AB >> PIN_ATS_CONF & 1) ^ (Ats_Conf_flip);  //ATS確認ボタン
+  static bool Ats_Conf_latch = Ats_Conf;                                //ATS確認ボタン
+  if (Ats_Conf != Ats_Conf_latch) {
     tmp_ser1_s = "ACF ";
     tmp_ser1_s += String(Ats_Conf);
     Serial1Print(tmp_ser1_s, true);
-    Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space
+    Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space:Keyboard.hに定義なし
     Ats_Conf_latch = Ats_Conf;
   }
 
   //ATS復帰
-  bool Ats_Rec = !digitalRead(PIN_ATS_REC);
-  if (set_InputFlip >> 2 & 1) {
-    Ats_Rec = !Ats_Rec;
-  }
+  bool Ats_Rec = !digitalRead(PIN_ATS_REC) ^ (set_InputFlip >> 2 & 1);
   static bool Ats_Rec_latch = Ats_Rec;
   if (Ats_Rec != Ats_Rec_latch) {
-    Keyboard_Press_Release_BVE(Ats_Rec, 0xD2);  //Home
+    Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);  //Home:0xD2
     Ats_Rec_latch = Ats_Rec;
   }
 }
@@ -1115,8 +1107,8 @@ void read_Panto(void) {
   bool Panto = ~ioexp_1_AB >> PIN_PANTO & 1;
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
-    Keyboard_Press_Release_BVE(Panto, 0x82);  //Alt
-    Keyboard_Press_Release_BVE(Panto, 0xC5);  //F4
+    Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
+    Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
     Panto_latch = Panto;
   }
 }
@@ -1146,13 +1138,10 @@ void read_Light(void) {
 }
 
 void read_EB(void) {
-  bool EB_SW = !digitalRead(PIN_EB_SW);
-  if (set_InputFlip >> 3 & 1) {
-    EB_SW = !EB_SW;
-  }
+  bool EB_SW = !digitalRead(PIN_EB_SW) ^ (set_InputFlip >> 3 & 1);
   static bool EB_SW_latch = false;
   if (EB_SW != EB_SW_latch) {
-    Keyboard_Press_Release_BVE(EB_SW, KEY_DELETE);  //Delete
+    Keyboard_Press_Release_BVE(EB_SW, KEY_DELETE);  //Delete:0xD4
     EB_SW_latch = EB_SW;
   }
 }
