@@ -48,7 +48,7 @@
 > 仕組みについての詳細は[こちら](https://github.com/GraphTechKEN/SerialOutputEx)のSerialOutputExを参照してください。※SerialOutputExのDLと導入は不要です※
 
 ## 謝辞
-本開発品はツナギ図 laboratory(ED67900-5様代表ほか)の出版冊子[実物部品を使った運転シミュレータのつくりかた | ](https://booth.pm/ja/items/1756291)を参考にしております。  
+本開発品はツナギ図 laboratory(ED67900-5様代表ほか)の出版冊子[実物部品を使った運転シミュレータのつくりかた](https://booth.pm/ja/items/1756291)を参考にしております。  
 この場を借りて御礼申し上げます。  
 本開発品は[まさき氏 X](https://x.com/ME48GEB1)により監修いただきました。この場を借りて御礼申し上げます。  
 本開発品は[万葉超音波温泉クハ115-1106](https://x.com/manyoonsen)の実車挙動を参考にさせていただきました。この場を借りて御礼申し上げます。
