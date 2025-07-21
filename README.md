@@ -45,7 +45,7 @@
 > 1.通信開始後、BveEXプラグインタブからインストールボタンをクリックします。  
 > または、  
 > 2.BveExフォルダを、ユーザー->パブリック->パブリックのドキュメントへそのままコピーします。  
-> 詳細は[こちら](https://github.com/GraphTechKEN/SerialOutputEx)のSerialOutputExを参照してください。※SerialOutputExのDLと導入は不要です※
+> 仕組みについての詳細は[こちら](https://github.com/GraphTechKEN/SerialOutputEx)のSerialOutputExを参照してください。※SerialOutputExのDLと導入は不要です※
 
 ## 謝辞
 本開発品はツナギ図 laboratory(ED67900-5様代表ほか)の出版冊子[実物部品を使った運転シミュレータのつくりかた | ](https://booth.pm/ja/items/1756291)を参考にしております。  
