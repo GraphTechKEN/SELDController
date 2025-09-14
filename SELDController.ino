@@ -75,6 +75,7 @@
 //V4.2.2.3 模型モード(modeN)トグルスイッチ修正、キーボード処理、マスコン処理周辺軽量化
 //V4.2.2.4 模型モード修正、キーボード処理、マスコン処理周辺軽量化
 //V4.2.2.5 USB入力とSerial入力判定部を共通化
+//V4.2.2.6 設定データのReturnが認知できなかったエラーを修正
 
 /*set_InputFlip
   1bit:警報持続 0:A接点 1:B接点
@@ -423,7 +424,7 @@ void loop() {
       }
 
       //圧力モニタ
-    } else if (str.startsWith("FV")) {
+    } else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1")) {
       if (str.length() > 4) {
         Serial.println(str);
       }
