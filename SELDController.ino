@@ -76,6 +76,7 @@
 //V4.2.2.4 模型モード修正、キーボード処理、マスコン処理周辺軽量化
 //V4.2.2.5 USB入力とSerial入力判定部を共通化
 //V4.2.2.6 設定データのReturnが認知できなかったエラーを修正
+//V4.2.2.7 String周辺を軽量化、PAN下シーケンスを追加
 
 /*set_InputFlip
   1bit:警報持続 0:A接点 1:B接点
@@ -239,8 +240,9 @@ bool EB_JR_move_E = false;  //非常ブレーキ
 
 String tmp_ser1_s = "";
 
-String strbve = "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/";
-String str = strbve;
+String strbve0 = "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/";
+String strbve = strbve0;
+String str = strbve0;
 String str_latch = str;
 
 void setup() {
@@ -690,14 +692,22 @@ uint16_t read_Break() {
     brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle);
 
     if (mode_POT) {
-      String pot = " Pot1: ";
-      pot += String(adc_raw + 10000);
-      pot.setCharAt(7, '0');
-      Serial.print(pot);
-      String deg = " Deg: ";
-      deg += String(brk_angl + 1000);
-      deg.setCharAt(6, '0');
-      Serial.println(deg);
+      char s0[8] = " Pot1: ";
+      s0[7] = '\0';
+      char s1[5];
+      s1[6] = '\0';
+      itoa(adc_raw + 10000, s1, 10);
+      s1[0] = '0';
+      Serial.print(s0);
+      Serial.print(s1);
+      char s2[7] = " Deg: ";
+      s2[6] = '\0';
+      char s3[5];
+      s3[4] = '\0';
+      itoa(brk_angl + 1000, s3, 10);
+      s3[0] = '0';
+      Serial.print(s2);
+      Serial.println(s3);
     }
 
     static uint8_t brk_angl_latch = brk_angl;
@@ -1004,6 +1014,7 @@ void read_Break_Setting(void) {
 }
 
 void read_Horn(void) {
+  char s[1];
   bool Horn_1 = (~ioexp_1_AB >> PIN_HORN_1 & 1) ^ (set_InputFlip >> 4 & 1);  //警笛1
   static bool Horn_1_latch = Horn_1;
   if (Horn_1 != Horn_1_latch) {
@@ -1012,8 +1023,9 @@ void read_Horn(void) {
     } else {
       Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);  //BackSpace:0xB2
     }
+    s[0] = '0' + Horn_1;
     tmp_ser1_s = "HN1 ";
-    tmp_ser1_s += String(Horn_1);
+    tmp_ser1_s += s[0];
     Serial1Print(tmp_ser1_s, false);  //モニターしない
     Horn_1_latch = Horn_1;
   }
@@ -1022,8 +1034,9 @@ void read_Horn(void) {
   static bool Horn_2_latch = Horn_2;
   if (Horn_2 != Horn_2_latch) {
     Keyboard_Press_Release_BVE(Horn_2, KEY_KP_PLUS);  //+:0xDF
+    s[0] = '0' + Horn_2;
     tmp_ser1_s = "HN2 ";
-    tmp_ser1_s += String(Horn_2);
+    tmp_ser1_s += s[0];
     Serial1Print(tmp_ser1_s, false);  //モニターしない
     Horn_2_latch = Horn_2;
   }
@@ -1053,8 +1066,10 @@ void read_Ats(void) {
   //ATS確認位置転送
   if (use_AtsContact) {
     if (Ats_Pos != Ats_Pos_latch) {
+      char s[1];
+      s[0] = '0' + Ats_Pos;
       tmp_ser1_s = "ATS ";
-      tmp_ser1_s += String(Ats_Pos);
+      tmp_ser1_s += s[0];
       Serial1Print(tmp_ser1_s, true);
     }
     Ats_Pos_latch = Ats_Pos;
@@ -1077,8 +1092,10 @@ void read_Ats(void) {
   bool Ats_Cont = (~ioexp_1_AB >> PIN_ATS_CONT & 1) ^ (set_InputFlip & 1);  //警報持続スイッチ
   static bool Ats_Cont_latch = Ats_Cont;                                    //警報持続スイッチ
   if (Ats_Cont != Ats_Cont_latch) {
+    char s[1];
+    s[0] = '0' + Ats_Cont;
     tmp_ser1_s = "ACT ";
-    tmp_ser1_s += String(Ats_Cont);
+    tmp_ser1_s += s[0];
     Serial1Print(tmp_ser1_s, true);
     Keyboard_Press_Release_BVE(Ats_Cont, KEY_INSERT);  //Insert:0xD1
     Ats_Cont_latch = Ats_Cont;
@@ -1088,8 +1105,10 @@ void read_Ats(void) {
   bool Ats_Conf = (~ioexp_1_AB >> PIN_ATS_CONF & 1) ^ (Ats_Conf_flip);  //ATS確認ボタン
   static bool Ats_Conf_latch = Ats_Conf;                                //ATS確認ボタン
   if (Ats_Conf != Ats_Conf_latch) {
+    char s[1];
+    s[0] = '0' + Ats_Conf;
     tmp_ser1_s = "ACF ";
-    tmp_ser1_s += String(Ats_Conf);
+    tmp_ser1_s += s[0];
     Serial1Print(tmp_ser1_s, true);
     Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space:Keyboard.hに定義なし
     Ats_Conf_latch = Ats_Conf;
@@ -1110,6 +1129,14 @@ void read_Panto(void) {
   if (Panto != Panto_latch) {
     Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
     Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
+    String str_pan = "PAN 0";
+    str = strbve0;
+    Serial1Print(str_pan, false);
+#ifndef SIMPLE
+    dac2.setVoltage(0, false);
+#else
+    analogWrite(11, 0);
+#endif
     Panto_latch = Panto;
   }
 }
