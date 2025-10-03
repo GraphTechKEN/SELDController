@@ -77,6 +77,7 @@
 //V4.2.2.5 USB入力とSerial入力判定部を共通化
 //V4.2.2.6 設定データのReturnが認知できなかったエラーを修正
 //V4.2.2.7 String周辺を軽量化、PAN下シーケンスを追加
+//V4.2.2.8 非常の'/'連打をやめる
 
 /*set_InputFlip
   1bit:警報持続 0:A接点 1:B接点
@@ -470,6 +471,8 @@ void loop() {
     } else {
       //通常モード：速度、戸閉、電流抽出
       if (str.length() > 11) {
+        tmp_ser1_s = "PAN 1";
+        Serial1Print(tmp_ser1_s, false);
         strbve = str;
         bve_speed = strbve.substring(0, 4).toInt();
 
@@ -898,20 +901,18 @@ void keyboard_control(String &str) {
       }
     }
     //非常
-    static bool EB_serial_write = false;
     bool condition = notch_brk == set_BrakeNotchNum + 1;
-    Keyboard_Press_Release_BVE(condition, '/');
-    if (condition) {
-      str.setCharAt(36, '1');
-      send_Serial1(str);
-      EB_serial_write = true;
-    } else {
-      if (EB_serial_write) {
-        str.setCharAt(36, '0');
-        send_Serial1(str);
-        EB_serial_write = false;
+    //後段に非常投入状態を転送する
+    static bool condition_latch = false;
+    if (condition != condition_latch) {
+      if(condition){
+        Keyboard.write('/');
       }
+      str.setCharAt(36, condition + '0');
+      send_Serial1(str);
+      condition_latch = condition;
     }
+
     if (modeN) {
       Serial1Print(notch_brk_name, true);
     }
@@ -1349,11 +1350,15 @@ String rw_eeprom(uint8_t &dev, uint16_t &n, uint16_t &param, bool write, bool NG
 void AutoNotch(String &str) {
   if (str.length() > 49 && Auto_Notch_Adjust && !autoair_dir_mask) {
     if (str.charAt(47) == 'B') {
-      int bve_rev = 0;
-      if (str.charAt(44) == 'F') {
-        iDir_latch = 1;
-      } else if (str.charAt(44) == 'B') {
-        iDir_latch = -1;
+      switch (str.charAt(44)) {
+        case 'F':
+          iDir_latch = 1;
+          break;
+        case 'B':
+          iDir_latch = -1;
+          break;
+        default:
+          iDir_latch = 0;
       }
       char Buf[4];
       Buf[0] = str.charAt(48);
