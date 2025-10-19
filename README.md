@@ -11,7 +11,7 @@
 >- ※SELD 国鉄型発電ブレーキ併用電磁直通ブレーキシステムの名称
 
 ## 製作方法
-~~実装済基板は[こちら](http://graphtechken.booth.pm/items/6223832)~~   
+~~実装済基板とME38専用センサのセットは[こちら](http://graphtechken.booth.pm/items/6223832)~~   
 未実装生基板は[こちら](https://graphtechken.booth.pm/items/6901620)
 1. 部品表は[こちら](部品表.pdf)
 2. 基板は秋月電子製片面紙エポキシ・ユニバーサル基板　Ａの小タイプ(AE-5)またはサンハヤト製(ICB-97 1.2mm またはICB-97B 1.6mm)を推奨します。
