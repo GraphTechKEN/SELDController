@@ -1,10 +1,5 @@
 //Arduino Micro または Leonard を使用してください
 
-//Adafruit MCP23017 Arduino Library を導入してください。
-//Adafruit_MCP4725 Arduino Library は使用しません
-//導入方法：ライブラリマネージャーから上記を検索してインストールします
-
-
 //簡単な説明
 //コマンドに対応しました。デリミタ:CR、Baud:115200、DataBits:8、StopBit:1
 //マスコン4段or5段、ブレーキX段+EBです。 ブレーキ段数は"WR 004 X(CR)"で段数(X)指定できます。
@@ -13,7 +8,7 @@
 //ブレーキ側はポテンショの値を角度換算し、ブレーキノッチ(N,B1～EB)を指示します。
 
 //BVEゲーム開始時は、一旦ブレーキハンドルをN→常用最大(or EB)、マスコンノッチはN、レバーサハンドルをB→N→Fと動かす等してリセットします。
-//※AtsEXを導入し、最新プラグインを適用すると上記を自動で調整します。
+//※BveEx(旧AtsEx)を導入し、SELDController最新プラグインを適用すると上記を自動で調整します。
 
 //更新履歴
 //V2   ブレーキ弁角度と段数を計算で処理するようにした
@@ -78,6 +73,9 @@
 //V4.2.2.6 設定データのReturnが認知できなかったエラーを修正
 //V4.2.2.7 String周辺を軽量化、PAN下シーケンスを追加
 //V4.2.2.8 非常の'/'連打をやめる
+//V4.2.2.9 模型モード微修正(トグル操作orコマンド操作でB8、Pノッチリセット)
+//V4.2.3.0 交直切替対応
+//V4.2.3.1 容量削減のためライブラリの使用を停止
 
 /*set_InputFlip
   1bit:警報持続 0:A接点 1:B接点
@@ -90,13 +88,12 @@
   8bit:メーター確認 0:実行 2:なし
   */
 
-#include <Adafruit_MCP23X17.h>
-#include <Adafruit_MCP4725.h>
 #include <EEPROM.h>
 #include <Wire.h>
 #include <Keyboard.h>
+#include <SPI.h>
 
-//#define SIMPLE MCP3008およびMCP4725を使用しない定義用
+//#define SIMPLE MCP3008およびMCP4725を使用しない場合にコメントアウトを削除します
 
 //MCP23S17接続ピン定義
 //マスコン入力
@@ -129,22 +126,30 @@
 #define PIN_BVE_MODE 12
 //Arduino Micro接続ピン定義
 
-//MCP3008/MCP23S17不使用時SPI_SS定義
+//MCP3008使用時SPI_SS定義
 #ifndef SIMPLE
 #define SS_Brk 4  //MCP3008_Brk
-#define SS_Mc SS  //MCP23S17_MC
 #endif
-//MCP3008/MCP23S17不使用時SPI_SS定義
+//MCP3008使用時SPI_SS定義
+
+//MCP23S17SPI_SS定義
+#define SS_Mc SS  //MCP23S17_MC
+//MCP23S17SPI_SS定義
+
+//SPI_SSピン(PB0)をレジスタで直接叩くためのマクロ
+#define CS_LOW() PORTB &= ~_BV(PB0)
+#define CS_HIGH() PORTB |= _BV(PB0)
+//SPI_SSピン(PB0)をレジスタで直接叩くためのマクロ
+
+//MCP4725デバイスのアドレス定義
+#define DAC1_ADDR 0x60
+#define DAC2_ADDR 0x61
+//MCP4725デバイスのアドレス定義
 
 //↓デバッグのコメント(//)を解除するとシリアルモニタでデバッグできます
 //#define DEBUG
 
-Adafruit_MCP23X17 mcp;
-#ifndef SIMPLE
-Adafruit_MCP4725 dac;
-Adafruit_MCP4725 dac2;
-#endif
-
+//MCP3008用SPI設定定義
 SPISettings settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);
 
 uint16_t ioexp_1_AB = 0;
@@ -258,29 +263,43 @@ void setup() {
   pinMode(2, INPUT_PULLUP);
   pinMode(3, INPUT_PULLUP);
 #endif
-
-  pinMode(PIN_ATS_REC, INPUT_PULLUP);   //ATS復帰
-  pinMode(10, INPUT_PULLUP);            //予備
-  pinMode(11, INPUT_PULLUP);            //予備SW1
-  pinMode(PIN_BVE_MODE, INPUT_PULLUP);  //BVE模型切替SW BVE:1 模型:0
+  // 8(ATS復帰), 10(予備), 11(予備SW1)を一括で INPUT_PULLUP に設定
+  DDRB &= ~(_BV(PB4) | _BV(PB6) | _BV(PB7));  // D8, D10, D11 を入力に設定
+  PORTB |= (_BV(PB4) | _BV(PB6) | _BV(PB7));  // D8, D10, D11 をプルアップ
+  // 12(PIN_BVE_MODE) pinMode(PIN_BVE_MODE, INPUT_PULLUP) の代わり
+  DDRD &= ~_BV(PD6);  // D12 (PD6) を入力に設定
+  PORTD |= _BV(PD6);  // D12 (PD6) のプルアップ抵抗を有効化pinMode(PIN_BVE_MODE, INPUT_PULLUP);  //BVE模型切替SW BVE:1 模型:0
 
   Serial.begin(115200);
   Serial1.begin(115200);
   Serial.setTimeout(10);
   Serial1.setTimeout(10);
 #ifndef SIMPLE
-  dac.begin(0x60);
-  dac2.begin(0x61);
+  //dac.begin(0x60);
+  //dac2.begin(0x61);
+  Wire.begin();
+  Wire.setClock(400000);  // 高速モード
 #endif
 
   Keyboard.begin();
 
-  if (mcp.begin_SPI(SS_Mc)) {
+  /*if (mcp.begin_SPI(SS_Mc)) {
     // マスコンスイッチを全てプルアップ
     for (uint8_t i = 0; i < 16; i++) {
       mcp.pinMode(i, INPUT_PULLUP);
     }
-  } /*else{
+  }*/
+  // SPIの初期化
+  SPI.begin();
+  DDRB |= _BV(PB0);  // SSピン(PB0)を出力に設定
+  CS_HIGH();         // SSピンをHIGH（非選択状態）にする
+
+  // 3. MCP23S17 の全ピン設定 (16ピン一括)
+  // IODIR (0x00) に 0xFFFF を書き込んで全入力
+  mcpWrite16(0x00, 0xFFFF);
+  // GPPU (0x0C) に 0xFFFF を書き込んで全プルアップ有効
+  mcpWrite16(0x0C, 0xFFFF);
+  /*else{
 Serial.println("Error.");
   }*/
 
@@ -350,7 +369,7 @@ Serial.println("Error.");
     EEPROM.get(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
     EEPROM.get(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
   }
-  modeN = digitalRead(PIN_BVE_MODE);
+  modeN = PIND & _BV(PD6);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
   modeBVE = !modeN;
   //速度計テスト
   if (!(set_InputFlip >> 7 & 1)) {
@@ -372,12 +391,15 @@ void loop() {
   read_USB();
   read_Serial1();
 
-  bool tmp_mode_n = !digitalRead(PIN_BVE_MODE);  //BVE模型切替SW BVE:1 模型:0
+  bool tmp_mode_n = !(PIND & _BV(PD6));  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12 //BVE模型切替SW BVE:1 模型:0
   static bool tmp_mode_n_latch = tmp_mode_n;
   if (tmp_mode_n != tmp_mode_n_latch) {
     modeN = !tmp_mode_n;
     modeBVE = tmp_mode_n;
     tmp_mode_n_latch = tmp_mode_n;
+    if (modeN) {
+      modeN_set();
+    }
   }
 
   if (str != str_latch) {
@@ -389,7 +411,10 @@ void loop() {
         uint8_t device = str.substring(3, 6).toInt();
         uint16_t num = str.substring(7, 12).toInt();
         if (device < 100) {
-          set_Settings(device, num);
+          String ret = set_Settings(device, num);
+          Serial.println(ret);
+          Serial1.print(ret);
+          Serial1.print('\r');
         }
       }
 
@@ -398,7 +423,10 @@ void loop() {
         uint8_t device = str.substring(3, 6).toInt();
         if (device < 100) {
           uint16_t nnn = 0;
-          Serial.println(rw_eeprom(device, nnn, nnn, false, false));
+          String ret = rw_eeprom(device, nnn, nnn, false, false);
+          Serial.println(ret);
+          Serial1.print(ret);
+          Serial1.print('\r');
         }
       }
 
@@ -426,21 +454,21 @@ void loop() {
         Accident_Mode = str.charAt(4) == '1';
       }
 
-      //圧力モニタ
-    } else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1")) {
+      //圧力モニタ、交直切替4.2.3.0追加
+    } else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
       if (str.length() > 4) {
         Serial.println(str);
       }
     } else if (str.startsWith("MD ")) {
       //模型モード
       if (str.indexOf("N   ") > 0) {
-        s = "OK N   ";
         if (str.length() > 7) {
           int16_t num = str.substring(7, 12).toInt();
+          s = "OK N   ";
           if (num) {
             modeN = true;
             modeBVE = false;
-            set_BrakeNotchNum = 8;
+            modeN_set();
             s += "ON";
           } else {
             modeN = false;
@@ -449,17 +477,16 @@ void loop() {
           }
         }
       }
-
       //ポテンショ読取モード
       else if (str.indexOf("POT ") > 0) {
-        s = "OK POT ";
         if (str.length() > 7) {
           int16_t num = str.substring(7, 12).toInt();
+          s = "OK POT ";
           if (num) {
-            mode_POT = true;
+            mode_POT = 1;
             s += "ON";
           } else {
-            mode_POT = false;
+            mode_POT = 0;
             s += "OFF";
           }
         }
@@ -471,8 +498,6 @@ void loop() {
     } else {
       //通常モード：速度、戸閉、電流抽出
       if (str.length() > 11) {
-        tmp_ser1_s = "PAN 1";
-        Serial1Print(tmp_ser1_s, false);
         strbve = str;
         bve_speed = strbve.substring(0, 4).toInt();
 
@@ -540,26 +565,40 @@ void loop() {
   }
 }
 
-//MCP23S17読込
-//値が0でないとき　かつ n 回連続で同じ値を出力したときに値を変更する
+// 16bit一括読み取り用の軽量関数
+uint16_t mcpRead16(uint8_t reg) {
+  CS_LOW();
+  SPI.transfer(0x41);           // 読み込み用アドレス (0x40 | 0x01)
+  SPI.transfer(reg);            // 読み出し開始レジスタ (GPIO A: 0x12)
+  uint8_t a = SPI.transfer(0);  // Port A
+  uint8_t b = SPI.transfer(0);  // Port B
+  CS_HIGH();
+  return (uint16_t)a | ((uint16_t)b << 8);
+}
+
+// Flash節約用の軽量書き込み関数
+void mcpWrite16(uint8_t reg, uint16_t data) {
+  CS_LOW();
+  SPI.transfer(0x40);         // デバイスアドレス (A0-A2がGNDの場合)
+  SPI.transfer(reg);          // 書き込み開始レジスタ
+  SPI.transfer(data & 0xFF);  // Port A
+  SPI.transfer(data >> 8);    // Port B (自動インクリメント)
+  CS_HIGH();
+}
+
+// チャタリング防止付きの実行部分
 void read_IOexp() {
-  uint16_t temp_ioexp1_ini = mcp.readGPIOAB();
-  uint8_t n = 3;
-  if (temp_ioexp1_ini != 0) {
-    for (uint8_t i = 0; i < n; i++) {
-      uint16_t temp_ioexp1 = mcp.readGPIOAB();
-      if (temp_ioexp1 != 0) {
-        if (temp_ioexp1_ini == temp_ioexp1) {
-          if (i == n - 1) {
-            ioexp_1_AB = temp_ioexp1;
-          }
-        } else {
-          break;
-        }
-      } else {
-        break;
-      }
+  // GPIOレジスタ(0x12)から読み取り
+  uint16_t current = mcpRead16(0x12);
+
+  // 全ピンプルアップ時、何も押されていないと 0xFFFF になる
+  // 何かボタンが押された（どこかのビットが0になった）場合のみ処理
+  if (current != 0xFFFF) {
+    // 3回連続一致を確認して確定
+    for (uint8_t i = 0; i < 2; i++) {
+      if (mcpRead16(0x12) != current) return;
     }
+    ioexp_1_AB = current;
   }
 }
 
@@ -905,7 +944,7 @@ void keyboard_control(String &str) {
     //後段に非常投入状態を転送する
     static bool condition_latch = false;
     if (condition != condition_latch) {
-      if(condition){
+      if (condition) {
         Keyboard.write('/');
       }
       str.setCharAt(36, condition + '0');
@@ -925,10 +964,10 @@ void keyboard_control(String &str) {
       for (uint8_t i = 0; i < d; i++) {
         //前進
         if ((iDir - iDir_latch) > 0) {
-          Keyboard.write(0xDA);  //"↑"
+          Keyboard.write(KEY_UP_ARROW);  //"↑"
           //後進
         } else {
-          Keyboard.write(0xD9);  //"↓"
+          Keyboard.write(KEY_DOWN_ARROW);  //"↓"
         }
       }
     } else {
@@ -947,8 +986,7 @@ void keyboard_control(String &str) {
 void read_Break_Setting(void) {
   static uint16_t adj_N = 0;
   static uint16_t adj_EB = 0;
-  static unsigned long iniMillis_N = 0;
-  static unsigned long iniMillis_EB = 0;
+  static unsigned long iniMillis = 0;
   static uint8_t setMode_N = 0;
   static uint8_t setMode_EB = 0;
   String s = "";
@@ -964,13 +1002,13 @@ void read_Break_Setting(void) {
     if (setMode_N == 0) {
       adj_N = adcRead(0);
       setMode_N = 1;
-      iniMillis_N = millis();
+      iniMillis = millis();
       s = "POT_N = ";
       s += EEPROM.get(0, value);
       s += " ADC = ";
       s += adj_N;
     } else if (setMode_N == 1) {
-      if (millis() - iniMillis_N > 3000) {
+      if (millis() - iniMillis > 3000) {
         setMode_N = 2;
       }
       adj_N = (adj_N * 9 + adcRead(0)) * 0.1;
@@ -989,13 +1027,13 @@ void read_Break_Setting(void) {
     if (setMode_EB == 0) {
       adj_EB = adcRead(0);
       setMode_EB = 1;
-      iniMillis_EB = millis();
+      iniMillis = millis();
       s = "POT_EB = ";
       s += EEPROM.get(2, value);
       s += " ADC = ";
       s += adj_EB;
     } else if (setMode_EB == 1) {
-      if (millis() - iniMillis_EB > 3000) {
+      if (millis() - iniMillis > 3000) {
         setMode_EB = 2;
       }
       adj_EB = (adj_EB * 9 + adcRead(0)) * 0.1;
@@ -1134,7 +1172,8 @@ void read_Panto(void) {
     str = strbve0;
     Serial1Print(str_pan, false);
 #ifndef SIMPLE
-    dac2.setVoltage(0, false);
+    //dac2.setVoltage(0, false);
+    setVoltage(DAC2_ADDR, 0);
 #else
     analogWrite(11, 0);
 #endif
@@ -1189,7 +1228,8 @@ void disp_SpeedMeter(uint16_t spd) {
     }
   }
 #ifndef SIMPLE
-  dac.setVoltage(volt, false);
+  //dac.setVoltage(volt, false);
+  setVoltage(DAC1_ADDR, volt);
 #else
   analogWrite(10, volt >> 4);
 #endif
@@ -1386,7 +1426,8 @@ void disp_CurrentMeter(int16_t current) {
     }
     //出力
 #ifndef SIMPLE
-    dac2.setVoltage(map(v, 0, 2000, 0, 4095), false);
+    //dac2.setVoltage(map(v, 0, 2000, 0, 4095), false);
+    setVoltage(DAC2_ADDR, map(v, 0, 2000, 0, 4095));
 #else
     //analogWrite(11, map(v, 0, 2000, 0, 4095) / 4);
     analogWrite(11, map(v, 0, 2000, 0, 4095) >> 4);
@@ -1401,7 +1442,8 @@ void disp_CurrentMeter(int16_t current) {
     }
     //出力
 #ifndef SIMPLE
-    dac2.setVoltage(map(curr, 0, set_CurrentLimit, 0, 4095), false);
+    //dac2.setVoltage(map(curr, 0, set_CurrentLimit, 0, 4095), false);
+    setVoltage(DAC2_ADDR, map(curr, 0, set_CurrentLimit, 0, 4095));
 #else
     //analogWrite(11, map(curr, 0, set_CurrentLimit, 0, 4095) / 4));
     analogWrite(11, map(curr, 0, set_CurrentLimit, 0, 4095) >> 4));
@@ -1505,7 +1547,7 @@ void send_Serial1(String &str) {
   Serial1.print('\r');
 }
 
-void set_Settings(uint8_t &device, uint16_t &num) {
+String set_Settings(uint8_t &device, uint16_t &num) {
   String s = "";
   switch (device) {
     //緩め位置設定
@@ -1627,7 +1669,7 @@ void set_Settings(uint8_t &device, uint16_t &num) {
       s = "E0";
       break;
   }
-  Serial.println(s);
+  return s;
 }
 
 void setStringAt(uint8_t startIndex, String &str, uint16_t &value) {
@@ -1684,4 +1726,26 @@ void AutoAirMask() {
   } else {
     autoair_dir_mask = false;
   }
+}
+
+void modeN_set() {
+  set_BrakeNotchNum = 8;
+  EEPROM.put(4, set_BrakeNotchNum);
+  EEPROM.get(70, set_MCNotchNumConsole);
+  set_MCNotchNumBVE = set_MCNotchNumConsole;
+  EEPROM.put(72, set_MCNotchNumBVE);
+}
+
+void setVoltage(uint8_t address, uint16_t voltage) {
+  // 範囲外の値を防ぐ（0〜4095）
+  if (voltage > 4095) voltage = 4095;
+
+  Wire.beginTransmission(address);
+
+  // Fast Mode (上位4bitに0x00) + 電圧上位4bit
+  Wire.write((voltage >> 8) & 0x0F);
+  // 電圧下位8bit
+  Wire.write(voltage & 0xFF);
+
+  Wire.endTransmission();
 }
