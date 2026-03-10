@@ -128,13 +128,12 @@
 
 //MCP3008使用時SPI_SS定義
 #ifndef SIMPLE
-#define SS_Brk 4  //MCP3008_Brk
+//#define SS_Brk 4  //MCP3008_Brk
+// Arduino Micro Pin 4 = PORTD Bit 4 (PD4)
+#define CS_BRK_LOW() (PORTD &= ~(1 << 4))  // 4番ピンをLOWにする
+#define CS_BRK_HIGH() (PORTD |= (1 << 4))  // 4番ピンをHIGHにする
 #endif
 //MCP3008使用時SPI_SS定義
-
-//MCP23S17SPI_SS定義
-#define SS_Mc SS  //MCP23S17_MC
-//MCP23S17SPI_SS定義
 
 //SPI_SSピン(PB0)をレジスタで直接叩くためのマクロ
 #define CS_LOW() PORTB &= ~_BV(PB0)
@@ -149,8 +148,9 @@
 //↓デバッグのコメント(//)を解除するとシリアルモニタでデバッグできます
 //#define DEBUG
 
-//MCP3008用SPI設定定義
-SPISettings settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);
+//MCP3008/23S17用SPI設定定義
+SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);//1MHz
+SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);//4MHz
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
@@ -252,8 +252,8 @@ String str = strbve0;
 String str_latch = str;
 
 void setup() {
-  pinMode(SS_Brk, OUTPUT);           //MCP3008
-  pinMode(SS_Mc, OUTPUT);            //MCP23S17_MC
+  pinMode(4, OUTPUT);                //MCP3008
+  pinMode(SS, OUTPUT);               //MCP23S17
   pinMode(PIN_EB_SW, INPUT_PULLUP);  //EBスイッチ
   pinMode(PIN_DOOR_OUT, OUTPUT);     //BVE_Door
   digitalWrite(PIN_DOOR_OUT, 0);
@@ -283,12 +283,6 @@ void setup() {
 
   Keyboard.begin();
 
-  /*if (mcp.begin_SPI(SS_Mc)) {
-    // マスコンスイッチを全てプルアップ
-    for (uint8_t i = 0; i < 16; i++) {
-      mcp.pinMode(i, INPUT_PULLUP);
-    }
-  }*/
   // SPIの初期化
   SPI.begin();
   DDRB |= _BV(PB0);  // SSピン(PB0)を出力に設定
@@ -567,23 +561,27 @@ void loop() {
 
 // 16bit一括読み取り用の軽量関数
 uint16_t mcpRead16(uint8_t reg) {
+  SPI.beginTransaction(mcp23S17settings);
   CS_LOW();
   SPI.transfer(0x41);           // 読み込み用アドレス (0x40 | 0x01)
   SPI.transfer(reg);            // 読み出し開始レジスタ (GPIO A: 0x12)
   uint8_t a = SPI.transfer(0);  // Port A
   uint8_t b = SPI.transfer(0);  // Port B
   CS_HIGH();
+  SPI.endTransaction();
   return (uint16_t)a | ((uint16_t)b << 8);
 }
 
 // Flash節約用の軽量書き込み関数
 void mcpWrite16(uint8_t reg, uint16_t data) {
+  SPI.beginTransaction(mcp23S17settings);
   CS_LOW();
   SPI.transfer(0x40);         // デバイスアドレス (A0-A2がGNDの場合)
   SPI.transfer(reg);          // 書き込み開始レジスタ
   SPI.transfer(data & 0xFF);  // Port A
   SPI.transfer(data >> 8);    // Port B (自動インクリメント)
   CS_HIGH();
+  SPI.endTransaction();
 }
 
 // チャタリング防止付きの実行部分
@@ -606,15 +604,12 @@ void read_IOexp() {
 uint16_t adcRead(uint8_t ch) {  // 0 .. 7
 #ifndef SIMPLE
   byte channelData = (ch + 8) << 4;
-  //  Serial.println(String(channelData, BIN));
-  SPI.beginTransaction(settings);
-  digitalWrite(SS_Brk, LOW);
-  delayMicroseconds(100);
+  SPI.beginTransaction(mcp3008settings);
+  CS_BRK_LOW();
   SPI.transfer(0b00000001);                   // Start bit 1
   byte highByte = SPI.transfer(channelData);  // singleEnd
   byte lowByte = SPI.transfer(0x00);          // dummy
-  delayMicroseconds(100);
-  digitalWrite(SS_Brk, HIGH);
+  CS_BRK_HIGH();
   SPI.endTransaction();
   return ((highByte & 0x03) << 8) + lowByte;
 #else
