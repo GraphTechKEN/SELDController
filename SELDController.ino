@@ -76,8 +76,9 @@
 //V4.2.2.9 模型モード微修正(トグル操作orコマンド操作でB8、Pノッチリセット)
 //V4.2.3.0 交直切替対応
 //V4.2.3.1 容量削減のためライブラリの使用を停止
+//V4.2.3.2 ノッチ自動合わせの選択肢にシナリオ開始時のみを追加、前照灯(PageUp)、減光(PageDown)試験実装、パンタ下ボタンに'Alt+F4’or'P'を選択式とした
 
-/*set_InputFlip
+/*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
   (2bit:ATS確認ボタン) 0:A接点 1:B接点
   3bit:ATS復帰ボタン 0:A接点 1:B接点 
@@ -86,6 +87,11 @@
   6bit:警笛2 0:A接点 1:B接点
   7bit:抑速 0:抑速 1:非常
   8bit:メーター確認 0:実行 2:なし
+  */
+
+/*Ats_Conf_flip //076
+  1bit:ATS確認ボタン 0:A接点 1:B接点
+  2bit:パンタ下ボタン 0:A接点 1:B接点
   */
 
 #include <EEPROM.h>
@@ -149,8 +155,8 @@
 //#define DEBUG
 
 //MCP3008/23S17用SPI設定定義
-SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);//1MHz
-SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);//4MHz
+SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz
+SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);  //4MHz
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
@@ -251,6 +257,8 @@ String strbve = strbve0;
 String str = strbve0;
 String str_latch = str;
 
+bool flgFirstSend = false;  //078自動ノッチ合わせモード2のときに使用、004を受信時にtrue
+
 void setup() {
   pinMode(4, OUTPUT);                //MCP3008
   pinMode(SS, OUTPUT);               //MCP23S17
@@ -263,20 +271,17 @@ void setup() {
   pinMode(2, INPUT_PULLUP);
   pinMode(3, INPUT_PULLUP);
 #endif
-  // 8(ATS復帰), 10(予備), 11(予備SW1)を一括で INPUT_PULLUP に設定
-  DDRB &= ~(_BV(PB4) | _BV(PB6) | _BV(PB7));  // D8, D10, D11 を入力に設定
-  PORTB |= (_BV(PB4) | _BV(PB6) | _BV(PB7));  // D8, D10, D11 をプルアップ
-  // 12(PIN_BVE_MODE) pinMode(PIN_BVE_MODE, INPUT_PULLUP) の代わり
-  DDRD &= ~_BV(PD6);  // D12 (PD6) を入力に設定
-  PORTD |= _BV(PD6);  // D12 (PD6) のプルアップ抵抗を有効化pinMode(PIN_BVE_MODE, INPUT_PULLUP);  //BVE模型切替SW BVE:1 模型:0
+
+  pinMode(9, INPUT_PULLUP);   //ATS復帰
+  pinMode(10, INPUT_PULLUP);  //予備
+  pinMode(11, INPUT_PULLUP);  //予備SW1
+  pinMode(12, INPUT_PULLUP);  //予備SW2
 
   Serial.begin(115200);
   Serial1.begin(115200);
   Serial.setTimeout(10);
   Serial1.setTimeout(10);
 #ifndef SIMPLE
-  //dac.begin(0x60);
-  //dac2.begin(0x61);
   Wire.begin();
   Wire.setClock(400000);  // 高速モード
 #endif
@@ -285,8 +290,7 @@ void setup() {
 
   // SPIの初期化
   SPI.begin();
-  DDRB |= _BV(PB0);  // SSピン(PB0)を出力に設定
-  CS_HIGH();         // SSピンをHIGH（非選択状態）にする
+  CS_HIGH();  // SSピンをHIGH（非選択状態）にする
 
   // 3. MCP23S17 の全ピン設定 (16ピン一括)
   // IODIR (0x00) に 0xFFFF を書き込んで全入力
@@ -1136,8 +1140,8 @@ void read_Ats(void) {
   }
 
   //ATS確認
-  bool Ats_Conf = (~ioexp_1_AB >> PIN_ATS_CONF & 1) ^ (Ats_Conf_flip);  //ATS確認ボタン
-  static bool Ats_Conf_latch = Ats_Conf;                                //ATS確認ボタン
+  bool Ats_Conf = (~ioexp_1_AB >> PIN_ATS_CONF & 1) ^ (Ats_Conf_flip & 1);  //ATS確認ボタン
+  static bool Ats_Conf_latch = Ats_Conf;                                    //ATS確認ボタン
   if (Ats_Conf != Ats_Conf_latch) {
     char s[1];
     s[0] = '0' + Ats_Conf;
@@ -1151,53 +1155,51 @@ void read_Ats(void) {
   //ATS復帰
   bool Ats_Rec = !digitalRead(PIN_ATS_REC) ^ (set_InputFlip >> 2 & 1);
   static bool Ats_Rec_latch = Ats_Rec;
-  if (Ats_Rec != Ats_Rec_latch) {
-    Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);  //Home:0xD2
-    Ats_Rec_latch = Ats_Rec;
+  if (Ats_Rec && !Ats_Rec_latch) {
+    Keyboard.write(KEY_HOME);  //Home:0xD2
   }
+  Ats_Rec_latch = Ats_Rec;
 }
 
 void read_Panto(void) {
   bool Panto = ~ioexp_1_AB >> PIN_PANTO & 1;
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
-    Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
-    Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
-    String str_pan = "PAN 0";
-    str = strbve0;
-    Serial1Print(str_pan, false);
+    if (Ats_Conf_flip >> 2 & 1) {
+      Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
+      Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
+      String str_pan = "PAN 0";
+      str = strbve0;
+      Serial1Print(str_pan, false);
 #ifndef SIMPLE
-    //dac2.setVoltage(0, false);
-    setVoltage(DAC2_ADDR, 0);
+      //dac2.setVoltage(0, false);
+      setVoltage(DAC2_ADDR, 0);
 #else
-    analogWrite(11, 0);
+      analogWrite(11, 0);
 #endif
+    } else {
+      if (Panto) Keyboard.write('P');
+    }
     Panto_latch = Panto;
   }
 }
 
 void read_Light_Def(void) {
-  /*  Light_Def = ~ioexp_1_AB & (1 << PIN_LIGFT_DEF);
-    if ( Light_Def != Light_Def_latch )
-    {
-    modeBVE = Light_Def;
-    if (!Light_Def) {
-    set_BrakeNotchNum = 8;
-    }
-    }
-    Light_Def_latch = Light_Def;*/
+  bool Light_Def = ~ioexp_1_AB & (1 << PIN_LIGFT_DEF);
+  static bool Light_Def_latch = Light_Def;
+  if (Light_Def != Light_Def_latch) {
+    Keyboard.write(KEY_PAGE_DOWN);
+    Light_Def_latch = Light_Def;
+  }
 }
 
 void read_Light(void) {
-  /*Light_On = ~ioexp_1_AB & (1 << PIN_LIGHT_ON);
-    if ( Light_On != Light_On_latch )
-    {
-    modeBVE = Light_On;
-    if (!Light_On) {
-    set_BrakeNotchNum = 8;
-    }
-    }
-    Light_On_latch = Light_On;*/
+  bool Light_On = ~ioexp_1_AB & (1 << PIN_LIGHT_ON);
+  static bool Light_On_latch = Light_On;
+  if (Light_On != Light_On_latch) {
+    Keyboard.write(KEY_PAGE_UP);
+    Light_On_latch = Light_On;
+  }
 }
 
 void read_EB(void) {
@@ -1383,7 +1385,7 @@ String rw_eeprom(uint8_t &dev, uint16_t &n, uint16_t &param, bool write, bool NG
 
 //ノッチ自動調整 BVEからの入力に対して現在状態の比較を行い、ラッチに格納することでメインループで自動的に修正する
 void AutoNotch(String &str) {
-  if (str.length() > 49 && Auto_Notch_Adjust && !autoair_dir_mask) {
+  if (str.length() > 49 && (Auto_Notch_Adjust == 1 || (Auto_Notch_Adjust == 2 && flgFirstSend)) && !autoair_dir_mask) {
     if (str.charAt(47) == 'B') {
       switch (str.charAt(44)) {
         case 'F':
@@ -1401,6 +1403,7 @@ void AutoNotch(String &str) {
       Buf[2] = str.charAt(50);
       notch_brk_latch = strtol(Buf, NULL, 16);  //16進数→10進数に変換
     }
+    flgFirstSend = false;
   }
 }
 
@@ -1558,6 +1561,9 @@ String set_Settings(uint8_t &device, uint16_t &num) {
     //ブレーキ段数
     case 4:
       s = rw_eeprom(device, num, set_BrakeNotchNum, true, num == 0 || num > 255);
+      if (Auto_Notch_Adjust == 2) {
+        flgFirstSend = true;
+      }
       break;
 
     //直通帯幅
@@ -1648,10 +1654,14 @@ String set_Settings(uint8_t &device, uint16_t &num) {
       s = rw_eeprom(device, num, set_InputFlip, true, num < 0 || num > 65535);
       break;
     case 76:  //ATS確認ボタン反転 0:B接点 1以上:A接点
-      s = rw_eeprom(device, num, Ats_Conf_flip, true, num < 0 || num > 1);
+      s = rw_eeprom(device, num, Ats_Conf_flip, true, num < 0 || num > 65535);
       break;
     case 78:  //自動ノッチ合わせ
-      s = rw_eeprom(device, num, Auto_Notch_Adjust, true, num < 0 || num > 1);
+      s = rw_eeprom(device, num, Auto_Notch_Adjust, true, num < 0 || num > 2);
+      //開始時または変更時にフラグをtrue　AutoNotch内でフラグ解除
+      if (Auto_Notch_Adjust == 2) {
+        flgFirstSend = true;
+      }
       break;
     case 80:  //実際のエアー圧で自動帯再現
       s = rw_eeprom(device, num, use_AAB_RealAir, true, num < 0 || num > 1);
