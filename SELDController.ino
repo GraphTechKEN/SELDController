@@ -1166,6 +1166,8 @@ void read_Panto(void) {
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
     if (Ats_Conf_flip >> 1 & 1) {
+      if (Panto) Keyboard.write('P'); 
+    } else {
       Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
       Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
       String str_pan = "PAN 0";
@@ -1177,8 +1179,6 @@ void read_Panto(void) {
 #else
       analogWrite(11, 0);
 #endif
-    } else {
-      if (Panto) Keyboard.write('P');
     }
     Panto_latch = Panto;
   }
