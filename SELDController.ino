@@ -1165,7 +1165,7 @@ void read_Panto(void) {
   bool Panto = ~ioexp_1_AB >> PIN_PANTO & 1;
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
-    if (Ats_Conf_flip >> 2 & 1) {
+    if (Ats_Conf_flip >> 1 & 1) {
       Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
       Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
       String str_pan = "PAN 0";
