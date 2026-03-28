@@ -77,6 +77,7 @@
 //V4.2.3.0 交直切替対応
 //V4.2.3.1 容量削減のためライブラリの使用を停止
 //V4.2.3.2 ノッチ自動合わせの選択肢にシナリオ開始時のみを追加、前照灯(PageUp)、減光(PageDown)試験実装、パンタ下ボタンに'Alt+F4’or'P'を選択式とした
+//V4.2.3.3 B1接点情報伝送追加 076 1:ポテンショ 0:接点
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -92,6 +93,8 @@
 /*Ats_Conf_flip //076
   1bit:ATS確認ボタン 0:A接点 1:B接点
   2bit:パンタ下ボタン 0:A接点 1:B接点
+  3bit:上予備
+  4bit:B1電源使用時(自動帯有効) 0:接点 1:POT 
   */
 
 #include <EEPROM.h>
@@ -199,13 +202,12 @@ char cDir[2] = "  ";
 char cDir_N[2] = "  ";
 
 //ATS
-bool Ats_Pos = 0;              //ATS確認位置
-bool Ats_Pos_latch = 0;        //ATS確認位置
-uint8_t Ats_In_Count_On = 0;   //ATS確認位置チャタリング防止用
-uint8_t Ats_In_Count_Off = 0;  //ATS確認位置チャタリング防止用
-uint16_t set_InputFlip = 0;    //074 ボタン反転(旧警報持続ボタン反転 0:B接点 1以上:A接点)0:B接点 1以上:A接点
-uint16_t Ats_Conf_flip = 0;    //076 ATS確認ボタン反転 0:B接点 1以上:A接点
-uint16_t use_AtsContact = 0;   //082 ATS接点判定使用
+bool Ats_Pos = 0;        //ATS確認位置
+bool Ats_Pos_latch = 0;  //ATS確認位置
+
+uint16_t set_InputFlip = 0;   //074 ボタン反転(旧警報持続ボタン反転 0:B接点 1以上:A接点)0:B接点 1以上:A接点
+uint16_t Ats_Conf_flip = 0;   //076 ATS確認ボタン反転 0:B接点 1以上:A接点
+uint16_t use_AtsContact = 0;  //082 ATS接点判定使用
 //ATS
 
 //以下ブレーキ位置調整用
@@ -410,9 +412,7 @@ void loop() {
         uint16_t num = str.substring(7, 12).toInt();
         if (device < 100) {
           String ret = set_Settings(device, num);
-          Serial.println(ret);
-          Serial1.print(ret);
-          Serial1.print('\r');
+          Serial1Print(ret, true);
         }
       }
 
@@ -422,9 +422,7 @@ void loop() {
         if (device < 100) {
           uint16_t nnn = 0;
           String ret = rw_eeprom(device, nnn, nnn, false, false);
-          Serial.println(ret);
-          Serial1.print(ret);
-          Serial1.print('\r');
+          Serial1Print(ret, true);
         }
       }
 
@@ -529,17 +527,18 @@ void loop() {
     str_latch = str;
   }
 
-  read_IOexp();              //IOエキスパンダ読込ルーチン
-  read_Light_Def();          //減光ライト読込ルーチン
-  read_Light();              //前照灯読込ルーチン
-  read_MC();                 //マスコンノッチ読込ルーチン
-  read_Dir();                //マスコンレバーサ読込ルーチン
-  read_Break();              //ブレーキハンドル読込ルーチン
-  read_Break_Setting();      //ブレーキハンドル読込ルーチン(未実装)
-  read_Horn();               //ホーンペダル読込ルーチン
-  read_Ats();                //ATS確認・警報持続読込ルーチン
-  read_Panto();              //強制終了ルーチン
-  read_EB();                 //EBスイッチ読込ルーチン
+  read_IOexp();          //IOエキスパンダ読込ルーチン
+  read_Light_Def();      //減光ライト読込ルーチン
+  read_Light();          //前照灯読込ルーチン
+  read_MC();             //マスコンノッチ読込ルーチン
+  read_Dir();            //マスコンレバーサ読込ルーチン
+  read_Break();          //ブレーキハンドル読込ルーチン
+  read_Break_Setting();  //ブレーキハンドル読込ルーチン(未実装)
+  read_Horn();           //ホーンペダル読込ルーチン
+  read_Ats();            //ATS確認・警報持続読込ルーチン
+  read_Panto();          //強制終了ルーチン
+  read_EB();             //EBスイッチ読込ルーチン
+  read_B1();
   keyboard_control(strbve);  //キーボード(HID)アウトプットルーチン
 
   //圧力値が変動時、下位および上位に伝送
@@ -1099,6 +1098,8 @@ bool In_and_Out(bool input, bool &output, uint8_t cycle_limit, uint8_t &cycle_on
 
 void read_Ats(void) {
   //ATS誤作動防止
+  static uint8_t Ats_In_Count_On = 0;   //ATS確認位置チャタリング防止用
+  static uint8_t Ats_In_Count_Off = 0;  //ATS確認位置チャタリング防止用
   In_and_Out(adcRead(1) < 1, Ats_Pos, 10, Ats_In_Count_On, Ats_In_Count_Off);
 
   //ATS確認位置転送
@@ -1166,7 +1167,7 @@ void read_Panto(void) {
   static bool Panto_latch = false;
   if (Panto != Panto_latch) {
     if (Ats_Conf_flip >> 1 & 1) {
-      if (Panto) Keyboard.write('P'); 
+      if (Panto) Keyboard.write('P');
     } else {
       Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
       Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
@@ -1753,4 +1754,27 @@ void setVoltage(uint8_t address, uint16_t voltage) {
   Wire.write(voltage & 0xFF);
 
   Wire.endTransmission();
+}
+
+void read_B1() {
+  if (use_AutoAirBrake) {
+    static bool B1D = false;
+    static bool B1D_latch = B1D;
+    bool B1_info = Ats_Conf_flip >> 3 & 1;
+    if (B1_info) {
+      B1D = brk_angl <= set_BrakeSAPAngle;
+    } else if (!B1_info) {
+      static uint8_t B1_In_Count_On = 0;
+      static uint8_t B1_In_Count_Off = 0;
+      In_and_Out(adcRead(3) < 1, B1D, 10, B1_In_Count_On, B1_In_Count_Off);
+    }
+
+    if (B1D_latch != B1D) {
+      tmp_ser1_s = "B1 ";
+      tmp_ser1_s += String(B1D, BIN);
+      Serial1Print(tmp_ser1_s, true);
+      send_Serial1(strbve);
+    }
+    B1D_latch = B1D;
+  }
 }
