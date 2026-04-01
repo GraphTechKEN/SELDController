@@ -77,7 +77,8 @@
 //V4.2.3.0 交直切替対応
 //V4.2.3.1 容量削減のためライブラリの使用を停止
 //V4.2.3.2 ノッチ自動合わせの選択肢にシナリオ開始時のみを追加、前照灯(PageUp)、減光(PageDown)試験実装、パンタ下ボタンに'Alt+F4’or'P'を選択式とした
-//V4.2.3.3 B1接点情報伝送追加 076 1:ポテンショ 0:接点
+//V4.2.3.3 B1接点情報伝送追加 076 4bit 1:ポテンショ 0:接点
+//V4.2.3.4 ATS電源接点情報伝送追加 076 5bit  1:ポテンショ 0:接点 084:ATS電源角度(ME48)
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -95,6 +96,7 @@
   2bit:パンタ下ボタン 0:A接点 1:B接点
   3bit:上予備
   4bit:B1電源使用時(自動帯有効) 0:接点 1:POT 
+  5bit:ATS電源 0:接点 1:POT 
   */
 
 #include <EEPROM.h>
@@ -205,9 +207,10 @@ char cDir_N[2] = "  ";
 bool Ats_Pos = 0;        //ATS確認位置
 bool Ats_Pos_latch = 0;  //ATS確認位置
 
-uint16_t set_InputFlip = 0;   //074 ボタン反転(旧警報持続ボタン反転 0:B接点 1以上:A接点)0:B接点 1以上:A接点
-uint16_t Ats_Conf_flip = 0;   //076 ATS確認ボタン反転 0:B接点 1以上:A接点
-uint16_t use_AtsContact = 0;  //082 ATS接点判定使用
+uint16_t set_InputFlip = 0;       //074 ボタン反転(旧警報持続ボタン反転 0:B接点 1以上:A接点)0:B接点 1以上:A接点
+uint16_t Ats_Conf_flip = 0;       //076 ATS確認ボタン反転 0:B接点 1以上:A接点
+uint16_t use_AtsContact = 0;      //082 ATS接点判定使用
+uint16_t set_AtsDengenAngle = 0;  //084 ATS電源接点角度(ME48)
 //ATS
 
 //以下ブレーキ位置調整用
@@ -260,6 +263,7 @@ String str = strbve0;
 String str_latch = str;
 
 bool flgFirstSend = false;  //078自動ノッチ合わせモード2のときに使用、004を受信時にtrue
+int16_t bve_current = 0;
 
 void setup() {
   pinMode(4, OUTPUT);                //MCP3008
@@ -336,6 +340,7 @@ Serial.println("Error.");
     EEPROM.put(78, Auto_Notch_Adjust);               //自動ノッチ合わせ
     EEPROM.put(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
     EEPROM.put(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
+    EEPROM.put(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
     //初回書き込みフラグセット
     EEPROM.put(100, 1);
   } else {
@@ -368,8 +373,9 @@ Serial.println("Error.");
     EEPROM.get(78, Auto_Notch_Adjust);               //自動ノッチ合わせ
     EEPROM.get(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
     EEPROM.get(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
+    EEPROM.get(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
   }
-  modeN = PIND & _BV(PD6);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
+  modeN = digitalRead(PIN_BVE_MODE);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
   modeBVE = !modeN;
   //速度計テスト
   if (!(set_InputFlip >> 7 & 1)) {
@@ -380,181 +386,28 @@ Serial.println("Error.");
 }
 
 void loop() {
-  static int16_t bve_current = 0;
-  static uint16_t BC_press_latch = BC_press;
-  static uint16_t BP_press_latch = BP_press;
-  static uint16_t ER_press_latch = ER_press;
   use_AutoAirBrake = set_AutoAirBrake & 1;
   use_BveEX = set_AutoAirBrake >> 2 & 1;
   use_AutoAirBrakeDirectSend = set_AutoAirBrake >> 3 & 1;
   mode_TS185 = set_AutoAirBrake >> 4 & 1;
-  read_USB();
-  read_Serial1();
-
-  bool tmp_mode_n = !(PIND & _BV(PD6));  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12 //BVE模型切替SW BVE:1 模型:0
-  static bool tmp_mode_n_latch = tmp_mode_n;
-  if (tmp_mode_n != tmp_mode_n_latch) {
-    modeN = !tmp_mode_n;
-    modeBVE = tmp_mode_n;
-    tmp_mode_n_latch = tmp_mode_n;
-    if (modeN) {
-      modeN_set();
-    }
-  }
-
-  if (str != str_latch) {
-    uint8_t i = 0;
-    String s = "";
-    if (str.startsWith("WR ")) {
-      //設定モード
-      if (str.length() > 7) {
-        uint8_t device = str.substring(3, 6).toInt();
-        uint16_t num = str.substring(7, 12).toInt();
-        if (device < 100) {
-          String ret = set_Settings(device, num);
-          Serial1Print(ret, true);
-        }
-      }
-
-    } else if (str.startsWith("RD ")) {
-      if (str.length() > 5) {
-        uint8_t device = str.substring(3, 6).toInt();
-        if (device < 100) {
-          uint16_t nnn = 0;
-          String ret = rw_eeprom(device, nnn, nnn, false, false);
-          Serial1Print(ret, true);
-        }
-      }
-
-    } else if (str.startsWith("BC ")) {
-      if (use_AutoAirBrake && !mode_TS185) {
-        if (use_AAB_RealAir) {
-          BC_press = str.substring(3, 6).toInt();
-          Serial.println(str);
-        }
-      }
-
-      //キーボードモード 4.2.1.6追加
-    } else if (str.startsWith("KEY")) {
-      KeyPut(str);
-
-      //PANモード 4.2.1.6追加
-    } else if (str.startsWith("PAN")) {
-      if (str.length() > 4) {
-        Pan_Mode = str.charAt(4) == '1';
-      }
-
-      //事故モード 4.2.2.2追加 マスコンレバーサ無効
-    } else if (str.startsWith("ACD")) {
-      if (str.length() > 4) {
-        Accident_Mode = str.charAt(4) == '1';
-      }
-
-      //圧力モニタ、交直切替4.2.3.0追加
-    } else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
-      if (str.length() > 4) {
-        Serial.println(str);
-      }
-    } else if (str.startsWith("MD ")) {
-      //模型モード
-      if (str.indexOf("N   ") > 0) {
-        if (str.length() > 7) {
-          int16_t num = str.substring(7, 12).toInt();
-          s = "OK N   ";
-          if (num) {
-            modeN = true;
-            modeBVE = false;
-            modeN_set();
-            s += "ON";
-          } else {
-            modeN = false;
-            modeBVE = true;
-            s += "OFF";
-          }
-        }
-      }
-      //ポテンショ読取モード
-      else if (str.indexOf("POT ") > 0) {
-        if (str.length() > 7) {
-          int16_t num = str.substring(7, 12).toInt();
-          s = "OK POT ";
-          if (num) {
-            mode_POT = 1;
-            s += "ON";
-          } else {
-            mode_POT = 0;
-            s += "OFF";
-          }
-        }
-      } else {
-        s = "E0";
-      }
-      Serial.println(s);
-
-    } else {
-      //通常モード：速度、戸閉、電流抽出
-      if (str.length() > 11) {
-        strbve = str;
-        bve_speed = strbve.substring(0, 4).toInt();
-
-        //戸閉灯指示
-        digitalWrite(PIN_DOOR_OUT, strbve.charAt(5) != '1');
-
-        bve_current = strbve.substring(7, 12).toInt();
-
-        //自動ノッチ合わせ機構
-        AutoNotch(strbve);
-
-        //BC抽出
-        if (strbve.length() >= 67) {
-          bve_BC_press = strbve.substring(55, 58).toInt();
-          bve_SAP_press = strbve.substring(63, 66).toInt();
-          //非常ブレーキ抽出
-          EB_JR_move_E = strbve.substring(36, 37).toInt();
-        }
-      }
-    }
-
-    //速度計表示補正 調整時表示のためここ
-    disp_SpeedMeter(bve_speed);
-
-    //電流計
-    disp_CurrentMeter(bve_current);
-
-
-    //Serial1転送
-    send_Serial1(str);
-    str_latch = str;
-  }
-
-  read_IOexp();          //IOエキスパンダ読込ルーチン
-  read_Light_Def();      //減光ライト読込ルーチン
-  read_Light();          //前照灯読込ルーチン
-  read_MC();             //マスコンノッチ読込ルーチン
-  read_Dir();            //マスコンレバーサ読込ルーチン
-  read_Break();          //ブレーキハンドル読込ルーチン
-  read_Break_Setting();  //ブレーキハンドル読込ルーチン(未実装)
-  read_Horn();           //ホーンペダル読込ルーチン
-  read_Ats();            //ATS確認・警報持続読込ルーチン
-  read_Panto();          //強制終了ルーチン
-  read_EB();             //EBスイッチ読込ルーチン
-  read_B1();
+  read_USB();                //USB読込ルーチン
+  read_Serial1();            //Serial1読込ルーチン
+  read_ModeN();              //模型モード制御
+  string_Analysis();         //電文解析
+  read_IOexp();              //IOエキスパンダ読込ルーチン
+  read_Light_Def();          //減光ライト読込ルーチン
+  read_Light();              //前照灯読込ルーチン
+  read_MC();                 //マスコンノッチ読込ルーチン
+  read_Dir();                //マスコンレバーサ読込ルーチン
+  read_Break();              //ブレーキハンドル読込ルーチン
+  read_Break_Setting();      //ブレーキハンドル読込ルーチン(未実装)
+  read_Horn();               //ホーンペダル読込ルーチン
+  read_Ats();                //ATS確認・警報持続読込ルーチン
+  read_Panto();              //強制終了ルーチン
+  read_EB();                 //EBスイッチ読込ルーチン
+  read_B1();                 //B1電源制御
   keyboard_control(strbve);  //キーボード(HID)アウトプットルーチン
-
-  //圧力値が変動時、下位および上位に伝送
-  if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
-    send_Serial1(strbve);
-    //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、modeBVEのとき)はBCの変化時にPCへ伝送
-    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && modeBVE) {
-      if (BC_press != BC_press_latch) {
-        Serial.print("BC ");
-        Serial.println(BC_press);
-      }
-    }
-    BC_press_latch = BC_press;
-    BP_press_latch = BP_press;
-    ER_press_latch = ER_press;
-  }
+  comm_Pressure();           //圧力伝送制御(Sim)
 
   delay(10);
   if (!modeBVE) {
@@ -1160,6 +1013,19 @@ void read_Ats(void) {
     Keyboard.write(KEY_HOME);  //Home:0xD2
   }
   Ats_Rec_latch = Ats_Rec;
+
+  //ATS電源
+  bool ATS_Dengen = (brk_angl < set_AtsDengenAngle) && ((Ats_Conf_flip >> 4 & 1));
+  //bool ATS_Dengen = (brk_angl < set_AtsDengenAngle);
+  static bool ATS_Dengen_latch = ATS_Dengen;
+  if (ATS_Dengen != ATS_Dengen_latch) {
+    char s[1];
+    s[0] = '0' + ATS_Dengen;
+    tmp_ser1_s = "ADN ";
+    tmp_ser1_s += s[0];
+    Serial1Print(tmp_ser1_s, true);
+    ATS_Dengen_latch = ATS_Dengen;
+  }
 }
 
 void read_Panto(void) {
@@ -1670,6 +1536,9 @@ String set_Settings(uint8_t &device, uint16_t &num) {
     case 82:  //ATS接点情報を他基板へ伝送
       s = rw_eeprom(device, num, use_AtsContact, true, num < 0 || num > 1);
       break;
+    case 84:  //ATS電源接点角度(ME48)
+      s = rw_eeprom(device, num, set_AtsDengenAngle, true, num < 0 || num > 255);
+      break;
 
     default:
       s = "E0";
@@ -1757,24 +1626,191 @@ void setVoltage(uint8_t address, uint16_t voltage) {
 }
 
 void read_B1() {
-  if (use_AutoAirBrake) {
-    static bool B1D = false;
-    static bool B1D_latch = B1D;
-    bool B1_info = Ats_Conf_flip >> 3 & 1;
-    if (B1_info) {
-      B1D = brk_angl <= set_BrakeSAPAngle;
-    } else if (!B1_info) {
-      static uint8_t B1_In_Count_On = 0;
-      static uint8_t B1_In_Count_Off = 0;
-      In_and_Out(adcRead(3) < 1, B1D, 10, B1_In_Count_On, B1_In_Count_Off);
+
+  static bool B1_Dengen = false;
+  static bool B1_Dengen_latch = B1_Dengen;
+  bool B1_info = Ats_Conf_flip >> 3 & 1;
+  if (B1_info) {
+    if (use_AutoAirBrake) {
+      B1_Dengen = brk_angl <= set_BrakeSAPAngle;
+    } else {
+      B1_Dengen = brk_angl <= set_BrakeEBAngle;
+    }
+  } else if (!B1_info) {
+    static uint8_t B1_In_Count_On = 0;
+    static uint8_t B1_In_Count_Off = 0;
+    In_and_Out(adcRead(3) < 1, B1_Dengen, 10, B1_In_Count_On, B1_In_Count_Off);
+  }
+
+  if (B1_Dengen_latch != B1_Dengen) {
+    tmp_ser1_s = "B1 ";
+    tmp_ser1_s += String(B1_Dengen, BIN);
+    Serial1Print(tmp_ser1_s, true);
+    send_Serial1(strbve);
+  }
+  B1_Dengen_latch = B1_Dengen;
+}
+
+void read_ModeN() {
+  bool tmp_mode_n = !digitalRead(PIN_BVE_MODE);  //BVE模型切替SW BVE:1 模型:0
+  static bool tmp_mode_n_latch = tmp_mode_n;
+  if (tmp_mode_n != tmp_mode_n_latch) {
+    modeN = !tmp_mode_n;
+    modeBVE = tmp_mode_n;
+    if (modeN) {
+      modeN_set();
+    }
+    tmp_mode_n_latch = tmp_mode_n;
+  }
+}
+
+void string_Analysis() {
+  if (str != str_latch) {
+    uint8_t i = 0;
+    String s = "";
+    if (str.startsWith("WR ")) {
+      //設定モード
+      if (str.length() > 7) {
+        uint8_t device = str.substring(3, 6).toInt();
+        uint16_t num = str.substring(7, 12).toInt();
+        if (device <= 100) {
+          String ret = set_Settings(device, num);
+          Serial1Print(ret, true);
+        }
+      }
     }
 
-    if (B1D_latch != B1D) {
-      tmp_ser1_s = "B1 ";
-      tmp_ser1_s += String(B1D, BIN);
-      Serial1Print(tmp_ser1_s, true);
-      send_Serial1(strbve);
+    else if (str.startsWith("RD ")) {
+      if (str.length() > 5) {
+        uint8_t device = str.substring(3, 6).toInt();
+        if (device <= 100) {
+          uint16_t nnn = 0;
+          String ret = rw_eeprom(device, nnn, nnn, false, false);
+          Serial1Print(ret, true);
+        }
+      }
     }
-    B1D_latch = B1D;
+
+    else if (str.startsWith("BC ")) {
+      if (use_AutoAirBrake && !mode_TS185) {
+        if (use_AAB_RealAir) {
+          BC_press = str.substring(3, 6).toInt();
+          Serial.println(str);
+        }
+      }
+    }
+
+    //キーボードモード 4.2.1.6追加
+    else if (str.startsWith("KEY"))
+      KeyPut(str);
+
+    //PANモード 4.2.1.6追加
+    else if (str.startsWith("PAN")) {
+      if (str.length() > 4) Pan_Mode = str.charAt(4) == '1';
+    }
+
+    //事故モード 4.2.2.2追加 マスコンレバーサ無効
+    else if (str.startsWith("ACD")) {
+      if (str.length() > 4) Accident_Mode = str.charAt(4) == '1';
+    }
+
+    //圧力モニタ、交直切替4.2.3.0追加
+    else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
+      if (str.length() > 4) {
+        Serial.println(str);
+      }
+    }
+
+    else if (str.startsWith("MD ")) {
+      //模型モード
+      if (str.indexOf("N   ") > 0) {
+        if (str.length() > 7) {
+          int16_t num = str.substring(7, 12).toInt();
+          s = "OK N   ";
+          if (num) {
+            modeN = true;
+            modeBVE = false;
+            modeN_set();
+            s += "ON";
+          } else {
+            modeN = false;
+            modeBVE = true;
+            s += "OFF";
+          }
+        }
+      }
+      //ポテンショ読取モード
+      else if (str.indexOf("POT ") > 0) {
+        if (str.length() > 7) {
+          int16_t num = str.substring(7, 12).toInt();
+          s = "OK POT ";
+          if (num) {
+            mode_POT = 1;
+            s += "ON";
+          } else {
+            mode_POT = 0;
+            s += "OFF";
+          }
+        }
+      } else {
+        s = "E0";
+      }
+      Serial.println(s);
+
+    }
+    //通常モード：速度、戸閉、電流抽出
+    else {
+      if (str.length() > 11) {
+        strbve = str;
+        bve_speed = strbve.substring(0, 4).toInt();
+
+        //戸閉灯指示
+        bool doorClosed = (strbve.charAt(5) == '1');
+        digitalWrite(PIN_DOOR_OUT, !doorClosed);
+
+        bve_current = strbve.substring(7, 12).toInt();
+
+        //自動ノッチ合わせ機構
+        AutoNotch(strbve);
+
+        //BC抽出
+        if (strbve.length() >= 67) {
+          bve_BC_press = strbve.substring(55, 58).toInt();
+          bve_SAP_press = strbve.substring(63, 66).toInt();
+          //非常ブレーキ抽出
+          EB_JR_move_E = strbve.substring(36, 37).toInt();
+        }
+      }
+    }
+
+    //速度計表示補正 調整時表示のためここ
+    disp_SpeedMeter(bve_speed);
+
+    //電流計
+    disp_CurrentMeter(bve_current);
+
+    //Serial1転送
+    send_Serial1(str);
+    str_latch = str;
+  }
+}
+
+void comm_Pressure() {
+  //圧力値が変動時、下位および上位に伝送
+  static uint16_t BC_press_latch = BC_press;
+  static uint16_t BP_press_latch = BP_press;
+  static uint16_t ER_press_latch = ER_press;
+  if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
+    send_Serial1(strbve);
+    //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、modeBVEのとき)はBCの変化時にPCへ伝送
+    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && modeBVE) {
+      if (BC_press != BC_press_latch) {
+        Serial.print("BC ");
+        Serial.println(BC_press);
+      }
+    }
+    BC_press_latch = BC_press;
+    BP_press_latch = BP_press;
+    ER_press_latch = ER_press;
   }
 }
