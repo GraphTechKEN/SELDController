@@ -570,7 +570,7 @@ void read_Dir(void) {
 }
 
 //ブレーキ角度読取
-uint16_t read_Break() {
+void read_Break() {
   if (!deadman) {
     uint16_t adc_raw = adcRead(0);
     static uint16_t adc_latch = 0;
