@@ -79,7 +79,7 @@
 //V4.2.3.2 ノッチ自動合わせの選択肢にシナリオ開始時のみを追加、前照灯(PageUp)、減光(PageDown)試験実装、パンタ下ボタンに'Alt+F4’or'P'を選択式とした
 //V4.2.3.3 B1接点情報伝送追加 076 4bit 1:ポテンショ 0:接点
 //V4.2.3.4 ATS電源接点情報伝送追加 076 5bit  1:ポテンショ 0:接点 084:ATS電源角度(ME48)
-//V4.2.3.5 B1接点情報のチャタリング防止追加
+//V4.2.3.5 B1接点情報のチャタリング防止追加、ATS復帰スイッチが動作しないバグ修正
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -1010,11 +1010,11 @@ void read_Ats(void) {
   //ATS復帰
   bool Ats_Rec = !digitalRead(PIN_ATS_REC) ^ (set_InputFlip >> 2 & 1);
   static bool Ats_Rec_latch = Ats_Rec;
-  if (Ats_Rec && !Ats_Rec_latch) {
-    Keyboard.write(KEY_HOME);  //Home:0xD2
+  if (Ats_Rec != Ats_Rec_latch) {
+    Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);
+    Ats_Rec_latch = Ats_Rec;
   }
-  Ats_Rec_latch = Ats_Rec;
-
+  
   //ATS電源
   bool ATS_Dengen = (brk_angl < set_AtsDengenAngle) && ((Ats_Conf_flip >> 4 & 1));
   //bool ATS_Dengen = (brk_angl < set_AtsDengenAngle);
