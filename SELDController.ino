@@ -79,6 +79,7 @@
 //V4.2.3.2 ノッチ自動合わせの選択肢にシナリオ開始時のみを追加、前照灯(PageUp)、減光(PageDown)試験実装、パンタ下ボタンに'Alt+F4’or'P'を選択式とした
 //V4.2.3.3 B1接点情報伝送追加 076 4bit 1:ポテンショ 0:接点
 //V4.2.3.4 ATS電源接点情報伝送追加 076 5bit  1:ポテンショ 0:接点 084:ATS電源角度(ME48)
+//V4.2.3.5 B1接点情報のチャタリング防止追加
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -1631,15 +1632,20 @@ void read_B1() {
   static bool B1_Dengen_latch = B1_Dengen;
   bool B1_info = Ats_Conf_flip >> 3 & 1;
   if (B1_info) {
-    if (use_AutoAirBrake) {
-      B1_Dengen = brk_angl <= set_BrakeSAPAngle;
-    } else {
-      B1_Dengen = brk_angl <= set_BrakeEBAngle;
+    static uint8_t brk_angl_latch = brk_angl;
+    //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
+    if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter) {
+      if (use_AutoAirBrake) {
+        B1_Dengen = brk_angl <= set_BrakeSAPAngle;
+      } else {
+        B1_Dengen = brk_angl <= set_BrakeEBAngle;
+      }
+      brk_angl_latch = brk_angl;
     }
   } else if (!B1_info) {
     static uint8_t B1_In_Count_On = 0;
     static uint8_t B1_In_Count_Off = 0;
-    In_and_Out(adcRead(3) < 1, B1_Dengen, 10, B1_In_Count_On, B1_In_Count_Off);
+    In_and_Out(adcRead(3) < 5, B1_Dengen, 10, B1_In_Count_On, B1_In_Count_Off);
   }
 
   if (B1_Dengen_latch != B1_Dengen) {
