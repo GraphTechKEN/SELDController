@@ -80,6 +80,7 @@
 //V4.2.3.3 B1接点情報伝送追加 076 4bit 1:ポテンショ 0:接点
 //V4.2.3.4 ATS電源接点情報伝送追加 076 5bit  1:ポテンショ 0:接点 084:ATS電源角度(ME48)
 //V4.2.3.5 B1接点情報のチャタリング防止追加、ATS復帰スイッチが動作しないバグ修正
+//V4.2.3.6 自動帯から直通帯に戻した際ブレーキがかからなくなる重大インシデントを修正、USBシリアル通信非接続時の動作安定化
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -586,22 +587,24 @@ void read_Break() {
     brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle);
 
     if (mode_POT) {
-      char s0[8] = " Pot1: ";
-      s0[7] = '\0';
-      char s1[5];
-      s1[6] = '\0';
-      itoa(adc_raw + 10000, s1, 10);
-      s1[0] = '0';
-      Serial.print(s0);
-      Serial.print(s1);
-      char s2[7] = " Deg: ";
-      s2[6] = '\0';
-      char s3[5];
-      s3[4] = '\0';
-      itoa(brk_angl + 1000, s3, 10);
-      s3[0] = '0';
-      Serial.print(s2);
-      Serial.println(s3);
+      if (Serial && Serial.availableForWrite() > 32) {
+        char s0[8] = " Pot1: ";
+        s0[7] = '\0';
+        char s1[5];
+        s1[6] = '\0';
+        itoa(adc_raw + 10000, s1, 10);
+        s1[0] = '0';
+        Serial.print(s0);
+        Serial.print(s1);
+        char s2[7] = " Deg: ";
+        s2[6] = '\0';
+        char s3[5];
+        s3[4] = '\0';
+        itoa(brk_angl + 1000, s3, 10);
+        s3[0] = '0';
+        Serial.print(s2);
+        Serial.println(s3);
+      }
     }
 
     static uint8_t brk_angl_latch = brk_angl;
@@ -695,9 +698,11 @@ void read_Break() {
         EB_latch = true;
       }
       if ((notch_BrakeAAB != notch_BrakeAAB_latch) && !mode_TS185 && use_BveEX) {
-        //Serial.print();
-        Serial.print("AAB ");
-        Serial.println(notch_BrakeAAB, BIN);
+        if (Serial && Serial.availableForWrite() > 32) {
+          //Serial.print();
+          Serial.print("AAB ");
+          Serial.println(notch_BrakeAAB, BIN);
+        }
       }
       notch_BrakeAAB_latch = notch_BrakeAAB;
       brk_angl_latch = brk_angl;
@@ -709,12 +714,14 @@ void read_Break() {
 
     //ポテンショ生データ表示モード
     if (mode_POT) {
-      Serial.print(" Notch: ");
-      Serial.print(notch_brk_name);
-      Serial.print(" BP: ");
-      Serial.print(BP_press);
-      Serial.print(" BP_notch: ");
-      Serial.print(autoair_notch_brk);
+      if (Serial && Serial.availableForWrite() > 32) {
+        Serial.print(" Notch: ");
+        Serial.print(notch_brk_name);
+        Serial.print(" BP: ");
+        Serial.print(BP_press);
+        Serial.print(" BP_notch: ");
+        Serial.print(autoair_notch_brk);
+      }
     }
     adc_latch = adc;
   }
@@ -779,14 +786,14 @@ void keyboard_control(String &str) {
             }
           }
         }
-      }
-      //ブレーキ
-      if ((notch_brk - notch_brk_latch) > 0) {
-        if (modeBVE) {
-          if (!mode_TS185) {
-            Keyboard.write('.');
-          } else {
-            Keyboard.write('L');
+        //ブレーキ
+        if ((notch_brk - notch_brk_latch) > 0) {
+          if (modeBVE) {
+            if (!mode_TS185) {
+              Keyboard.write('.');
+            } else {
+              Keyboard.write('L');
+            }
           }
         }
       }
@@ -900,7 +907,9 @@ void read_Break_Setting(void) {
     setMode_EB = 0;
   }
   if (s != "") {
-    Serial.println(s);
+    if (Serial && Serial.availableForWrite() > 32) {
+      Serial.println(s);
+    }
   }
 }
 
@@ -1014,7 +1023,7 @@ void read_Ats(void) {
     Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);
     Ats_Rec_latch = Ats_Rec;
   }
-  
+
   //ATS電源
   bool ATS_Dengen = (brk_angl < set_AtsDengenAngle) && ((Ats_Conf_flip >> 4 & 1));
   //bool ATS_Dengen = (brk_angl < set_AtsDengenAngle);
@@ -1565,7 +1574,9 @@ void Serial1Print(String &command, bool monitor) {
   Serial1.print(command);
   Serial1.print('\r');
   if (monitor) {
-    Serial.println(command);
+    if (Serial && Serial.availableForWrite() > 32) {
+      Serial.println(command);
+    }
   }
 }
 
@@ -1701,7 +1712,9 @@ void string_Analysis() {
       if (use_AutoAirBrake && !mode_TS185) {
         if (use_AAB_RealAir) {
           BC_press = str.substring(3, 6).toInt();
-          Serial.println(str);
+          if (Serial && Serial.availableForWrite() > 32) {
+            Serial.println(str);
+          }
         }
       }
     }
@@ -1723,7 +1736,9 @@ void string_Analysis() {
     //圧力モニタ、交直切替4.2.3.0追加
     else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
       if (str.length() > 4) {
-        Serial.println(str);
+        if (Serial && Serial.availableForWrite() > 32) {
+          Serial.println(str);
+        }
       }
     }
 
@@ -1761,7 +1776,9 @@ void string_Analysis() {
       } else {
         s = "E0";
       }
-      Serial.println(s);
+      if (Serial && Serial.availableForWrite() > 32) {
+        Serial.println(s);
+      }
 
     }
     //通常モード：速度、戸閉、電流抽出
@@ -1811,8 +1828,10 @@ void comm_Pressure() {
     //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、modeBVEのとき)はBCの変化時にPCへ伝送
     if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && modeBVE) {
       if (BC_press != BC_press_latch) {
-        Serial.print("BC ");
-        Serial.println(BC_press);
+        if (Serial && Serial.availableForWrite() > 32) {
+          Serial.print("BC ");
+          Serial.println(BC_press);
+        }
       }
     }
     BC_press_latch = BC_press;
