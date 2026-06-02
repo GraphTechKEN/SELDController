@@ -64,9 +64,8 @@
 //V4.2.1.6 外部からのキー入力に対応("KEY c"c:char or "KEY 0xXX")
 //V4.2.1.7 軽量化および文字列のポインタ→参照渡しへ修正、ブレーキ弁調整モードを削除、エアー不使用時にATS直下など非常ブレーキ動作を導入
 //V4.2.1.8 BveEX起動時、直通帯でEB解除とならなかったため修正
-//V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN_DECの判定のみ)
-//V4.2.2.1 ブレーキ弁EB入力対応、ATSMxコマンドの修正
-//V4.2.2.2 事故モードを追加、マスコン、レバーサ無効、抑速段処理軽量化、Serial1→USB通信修正
+//V4.2.1.9 抑速段に入った場合でも1ノッチを投入する(PIN..,,ブレーキ弁EB入力対応、ATSMxコマンドの修正
+//V4.2.2.2 事故モードを追加、マスコン、レバーサ無効、抑速/段処理軽量化、Serial1→USB通信修正
 //V4.2.2.3 模型モード(modeN)トグルスイッチ修正、キーボード処理、マスコン処理周辺軽量化
 //V4.2.2.4 模型モード修正、キーボード処理、マスコン処理周辺軽量化
 //V4.2.2.5 USB入力とSerial入力判定部を共通化
@@ -84,6 +83,7 @@
 //V4.2.3.7 B1情報伝送コマンドを"B1 X"から"BDN X"に変更
 //V4.2.3.8 MCP23S17処理部を修正、!0xFFFF時を削除
 //V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定、バージョン管理を追加
+//V4.2.3.10 後段に非常状態を転送する機能を選択可とする 076 6bit:非常投入状態転送(36) 0:無効 1:有効
 
 // ------------------------------------------------
 // バージョン情報の定義
@@ -91,7 +91,7 @@
 #define VERSION_MAJOR 4
 #define VERSION_MINOR 2
 #define VERSION_PATCH 3
-#define VERSION_BUILD 9
+#define VERSION_BUILD 10
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -110,6 +110,7 @@
   3bit:上予備
   4bit:B1電源使用時(自動帯有効) 0:接点 1:POT 
   5bit:ATS電源 0:接点 1:POT 
+  6bit:非常投入状態転送(36) 0:無効 1:有効
   */
 
 #include <EEPROM.h>
@@ -301,6 +302,8 @@ void setup() {
   pinMode(PIN_EB_SW, INPUT_PULLUP);  //EBスイッチ
   pinMode(PIN_DOOR_OUT, OUTPUT);     //BVE_Door
   digitalWrite(PIN_DOOR_OUT, 0);
+  pinMode(LED_BUILTIN, OUTPUT);  //BVE_Door_Monitor
+  digitalWrite(LED_BUILTIN, LOW);
 
 #ifdef SIMPLE
   pinMode(A0, INPUT);
@@ -837,16 +840,17 @@ void keyboard_control(String &str) {
       }
     }
     //非常
-    bool condition = notch_brk == set_BrakeNotchNum + 1;
-    //後段に非常投入状態を転送する
-    static bool condition_latch = false;
-    if (condition != condition_latch) {
-      if (condition) {
+    bool condition_EB_state = notch_brk == set_BrakeNotchNum + 1;
+    //後段に非常投入状態を転送
+    bool transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
+    static bool condition_EB_state_latch = false;
+    if (transfer_EB_state && condition_EB_state != condition_EB_state_latch) {
+      if (condition_EB_state) {
         Keyboard.write('/');
       }
-      str.setCharAt(36, condition + '0');
+      str.setCharAt(36, condition_EB_state + '0');
       send_Serial1(str);
-      condition_latch = condition;
+      condition_EB_state_latch = condition_EB_state;
     }
 
     if (modeN) {
@@ -1838,6 +1842,7 @@ void string_Analysis() {
         //戸閉灯指示
         bool doorClosed = (strbve.charAt(5) == '1');
         digitalWrite(PIN_DOOR_OUT, !doorClosed);
+        digitalWrite(LED_BUILTIN, !doorClosed);
 
         bve_current = strbve.substring(7, 12).toInt();
 
