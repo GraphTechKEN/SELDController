@@ -83,7 +83,7 @@
 //V4.2.3.6 自動帯から直通帯に戻した際ブレーキがかからなくなる重大インシデントを修正、USBシリアル通信非接続時の動作安定化
 //V4.2.3.7 B1情報伝送コマンドを"B1 X"から"BDN X"に変更
 //V4.2.3.8 MCP23S17処理部を修正、!0xFFFF時を削除
-//V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定
+//V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定、バージョン管理を追加
 
 // ------------------------------------------------
 // バージョン情報の定義
@@ -174,7 +174,7 @@
 
 //MCP3008/23S17用SPI設定定義
 SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz MAX3.6MHz
-SPISettings mcp23S17settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);  //1MHz MAX10MHz
+SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);  //1MHz MAX10MHz
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
