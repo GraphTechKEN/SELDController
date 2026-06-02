@@ -85,6 +85,14 @@
 //V4.2.3.8 MCP23S17処理部を修正、!0xFFFF時を削除
 //V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定
 
+// ------------------------------------------------
+// バージョン情報の定義
+// ------------------------------------------------
+#define VERSION_MAJOR 4
+#define VERSION_MINOR 2
+#define VERSION_PATCH 3
+#define VERSION_BUILD 9
+
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
   (2bit:ATS確認ボタン) 0:A接点 1:B接点
@@ -165,8 +173,8 @@
 //#define DEBUG
 
 //MCP3008/23S17用SPI設定定義
-SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz
-SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);  //4MHz
+SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz MAX3.6MHz
+SPISettings mcp23S17settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);  //1MHz MAX10MHz
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
@@ -271,6 +279,22 @@ String str_latch = str;
 bool flgFirstSend = false;  //078自動ノッチ合わせモード2のときに使用、004を受信時にtrue
 int16_t bve_current = 0;
 
+struct VersionData {
+  uint8_t major;
+  uint8_t minor;
+  uint8_t patch;
+  uint8_t build;
+};
+
+// #define の値を構造体にセット
+VersionData currentVersion = {
+  VERSION_MAJOR,
+  VERSION_MINOR,
+  VERSION_PATCH,
+  VERSION_BUILD
+};
+
+
 void setup() {
   pinMode(4, OUTPUT);                //MCP3008
   pinMode(SS, OUTPUT);               //MCP23S17
@@ -347,8 +371,7 @@ Serial.println("Error.");
     EEPROM.put(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
     EEPROM.put(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
     EEPROM.put(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
-    //初回書き込みフラグセット
-    EEPROM.put(100, 1);
+    EEPROM.put(100, 1);                              //初回書き込みフラグセット
   } else {
     EEPROM.get(0, set_POT_N);                        //POT_N
     EEPROM.get(2, set_POT_EB);                       //POT_EB
@@ -381,6 +404,8 @@ Serial.println("Error.");
     EEPROM.get(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
     EEPROM.get(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
   }
+  EEPROM.put(90, 'C');  //SELD"C"ontroller
+  EEPROM.put(92, currentVersion);
   modeN = digitalRead(PIN_BVE_MODE);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
   modeBVE = !modeN;
   //速度計テスト
