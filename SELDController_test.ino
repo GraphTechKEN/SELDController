@@ -427,7 +427,6 @@ Serial.println("Error.");
 }
 
 void loop() {
-  Serial.println(modeBVE);
   use_AutoAirBrake = set_AutoAirBrake & 1;
   use_BveEX = set_AutoAirBrake >> 2 & 1;
   use_AutoAirBrakeDirectSend = set_AutoAirBrake >> 3 & 1;
