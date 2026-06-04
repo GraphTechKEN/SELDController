@@ -270,7 +270,8 @@ bool flg_set_BrakeNotchNum_changed = false;  //ブレーキ段数変更フラグ
 bool Pan_Mode = true;        //PAN 1:通電 PAN 0:停電
 bool Accident_Mode = false;  //ACD 1:事故 0:解除
 
-bool EB_JR_move_E = false;  //非常ブレーキ
+bool EB_JR_move_E = false;       //非常ブレーキ
+bool transfer_EB_state = false;  //後段に非常投入状態を転送
 
 String tmp_ser1_s = "";
 
@@ -776,6 +777,8 @@ void read_Break() {
 
 //キーボード(HID)出力
 void keyboard_control(String &str) {
+  //後段に非常投入状態を転送(0:しない 1:する)
+  transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
   //マスコンノッチが前回と異なるとき
   static int8_t notch_mc_latch = notch_mc;
   if (notch_mc != notch_mc_latch) {
@@ -847,15 +850,15 @@ void keyboard_control(String &str) {
     }
     //非常
     bool condition_EB_state = notch_brk == set_BrakeNotchNum + 1;
-    //後段に非常投入状態を転送
-    bool transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
     static bool condition_EB_state_latch = false;
-    if (transfer_EB_state && condition_EB_state != condition_EB_state_latch) {
+    if (condition_EB_state != condition_EB_state_latch) {
       if (condition_EB_state) {
         Keyboard.write('/');
       }
-      str.setCharAt(36, condition_EB_state + '0');
-      send_Serial1(str);
+      if (transfer_EB_state) {
+        str.setCharAt(36, condition_EB_state + '0');
+        send_Serial1(str);
+      }
       condition_EB_state_latch = condition_EB_state;
     }
 
@@ -1466,7 +1469,7 @@ void send_Serial1(String &str) {
     }
   }
   //非常
-  if (notch_brk == set_BrakeNotchNum + 1) {
+  if (transfer_EB_state && notch_brk == set_BrakeNotchNum + 1) {
     str.setCharAt(36, '1');
   }
 
