@@ -84,6 +84,7 @@
 //V4.2.3.8 MCP23S17処理部を修正、!0xFFFF時を削除
 //V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定、バージョン管理を追加
 //V4.2.3.10 後段に非常状態を転送する機能を選択可とする 076 6bit:非常投入状態転送(36) 0:無効 1:有効
+//V4.2.3.11 強制BVEモード追加、受信電文に対してLFの読み飛ばしを追加
 
 // ------------------------------------------------
 // バージョン情報の定義
@@ -91,7 +92,7 @@
 #define VERSION_MAJOR 4
 #define VERSION_MINOR 2
 #define VERSION_PATCH 3
-#define VERSION_BUILD 10
+#define VERSION_BUILD 11
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -102,7 +103,7 @@
   6bit:警笛2 0:A接点 1:B接点
   7bit:抑速 0:抑速 1:非常
   8bit:メーター確認 0:実行 2:なし
-  */
+*/
 
 /*Ats_Conf_flip //076
   1bit:ATS確認ボタン 0:A接点 1:B接点
@@ -111,7 +112,8 @@
   4bit:B1電源使用時(自動帯有効) 0:接点 1:POT 
   5bit:ATS電源 0:接点 1:POT 
   6bit:非常投入状態転送(36) 0:無効 1:有効
-  */
+  7bit:強制BVEモード
+*/
 
 #include <EEPROM.h>
 #include <Wire.h>
@@ -268,7 +270,8 @@ bool flg_set_BrakeNotchNum_changed = false;  //ブレーキ段数変更フラグ
 bool Pan_Mode = true;        //PAN 1:通電 PAN 0:停電
 bool Accident_Mode = false;  //ACD 1:事故 0:解除
 
-bool EB_JR_move_E = false;  //非常ブレーキ
+bool EB_JR_move_E = false;       //非常ブレーキ
+bool transfer_EB_state = false;  //後段に非常投入状態を転送
 
 String tmp_ser1_s = "";
 
@@ -409,7 +412,11 @@ Serial.println("Error.");
   }
   EEPROM.put(90, 'C');  //SELD"C"ontroller
   EEPROM.put(92, currentVersion);
-  modeN = digitalRead(PIN_BVE_MODE);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
+  if (Ats_Conf_flip >> 6 & 1) {
+    modeN = digitalRead(PIN_BVE_MODE);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
+  } else {
+    modeN = false;
+  }
   modeBVE = !modeN;
   //速度計テスト
   if (!(set_InputFlip >> 7 & 1)) {
@@ -770,6 +777,8 @@ void read_Break() {
 
 //キーボード(HID)出力
 void keyboard_control(String &str) {
+  //後段に非常投入状態を転送(0:しない 1:する)
+  transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
   //マスコンノッチが前回と異なるとき
   static int8_t notch_mc_latch = notch_mc;
   if (notch_mc != notch_mc_latch) {
@@ -841,15 +850,15 @@ void keyboard_control(String &str) {
     }
     //非常
     bool condition_EB_state = notch_brk == set_BrakeNotchNum + 1;
-    //後段に非常投入状態を転送
-    bool transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
     static bool condition_EB_state_latch = false;
-    if (transfer_EB_state && condition_EB_state != condition_EB_state_latch) {
+    if (condition_EB_state != condition_EB_state_latch) {
       if (condition_EB_state) {
         Keyboard.write('/');
       }
-      str.setCharAt(36, condition_EB_state + '0');
-      send_Serial1(str);
+      if (transfer_EB_state) {
+        str.setCharAt(36, condition_EB_state + '0');
+        send_Serial1(str);
+      }
       condition_EB_state_latch = condition_EB_state;
     }
 
@@ -1373,12 +1382,22 @@ void disp_CurrentMeter(int16_t current) {
 void read_Serial1() {
   if (Serial1.available() > 0) {
     str = Serial1.readStringUntil('\r');
+    str.trim();
+    // 次の文字が LF ('\n') なら、バッファから1文字読み飛ばす（CRLF対策）
+    if (Serial1.peek() == '\n') {
+      Serial1.read();
+    }
   }
 }
 
 void read_USB() {
   if (Serial.available()) {
     str = Serial.readStringUntil('\r');
+  }
+  str.trim();
+  // 次の文字が LF ('\n') なら、バッファから1文字読み飛ばす（CRLF対策）
+  if (Serial.peek() == '\n') {
+    Serial.read();
   }
 }
 
@@ -1460,7 +1479,7 @@ void send_Serial1(String &str) {
     }
   }
   //非常
-  if (notch_brk == set_BrakeNotchNum + 1) {
+  if (transfer_EB_state && notch_brk == set_BrakeNotchNum + 1) {
     str.setCharAt(36, '1');
   }
 
