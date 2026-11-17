@@ -85,6 +85,9 @@
 //V4.2.3.9 ブレーキ段数0段(直通帯無効)を仮設定、バージョン管理を追加
 //V4.2.3.10 後段に非常状態を転送する機能を選択可とする 076 6bit:非常投入状態転送(36) 0:無効 1:有効
 //V4.2.3.11 強制BVEモード追加、受信電文に対してLFの読み飛ばしを追加
+//V4.2.3.12 リファクタリング(動作変更なし) EEPROM設定をテーブル化、設定ビット/電文位置/ピンを定数化、read_Break・keyboard_control・string_Analysisを関数分割、Stringを文字配列に置換、read_Breakのデバッグ表示の範囲外書込とSIMPLE構成のビルドエラーを修正
+//V4.2.3.13 ブレーキポテンショのN位置とEB位置の大小を問わず動作するよう修正(N>EBでも可。ポテンショの+とGNDを逆に接続可能)。N位置とEB位置が同値のときの0除算も回避
+//V4.2.3.14 ME38/49の抜取保ち位置での抜取(接点不使用時)に対応
 
 // ------------------------------------------------
 // バージョン情報の定義
@@ -92,7 +95,7 @@
 #define VERSION_MAJOR 4
 #define VERSION_MINOR 2
 #define VERSION_PATCH 3
-#define VERSION_BUILD 11
+#define VERSION_BUILD 14
 
 /*set_InputFlip //074
   1bit:警報持続 0:A接点 1:B接点
@@ -122,74 +125,212 @@
 
 //#define SIMPLE MCP3008およびMCP4725を使用しない場合にコメントアウトを削除します
 
-//MCP23S17接続ピン定義
+//↓デバッグのコメント(//)を解除するとシリアルモニタでデバッグできます
+//#define DEBUG
+
+// ================================================
+// ピン・デバイス定義
+// ================================================
+
+//MCP23S17接続ピン定義(ビット位置)
 //マスコン入力
-#define PIN_MC_1 0
-#define PIN_MC_2 1
-#define PIN_MC_3 2
-#define PIN_MC_4 3
-#define PIN_MC_5 4
-#define PIN_MC_DEC 5
+constexpr uint8_t PIN_MC_1 = 0;
+constexpr uint8_t PIN_MC_2 = 1;
+constexpr uint8_t PIN_MC_3 = 2;
+constexpr uint8_t PIN_MC_4 = 3;
+constexpr uint8_t PIN_MC_5 = 4;
+constexpr uint8_t PIN_MC_DEC = 5;
 //レバーサ入力
-#define PIN_MC_DIR_F 6
-#define PIN_MC_DIR_B 7
+constexpr uint8_t PIN_MC_DIR_F = 6;
+constexpr uint8_t PIN_MC_DIR_B = 7;
 //警笛入力
-#define PIN_HORN_1 8
-#define PIN_HORN_2 9
+constexpr uint8_t PIN_HORN_1 = 8;
+constexpr uint8_t PIN_HORN_2 = 9;
 //ATS警報持続入力
-#define PIN_ATS_CONT 10
+constexpr uint8_t PIN_ATS_CONT = 10;
 //スイッチボックス入力
-#define PIN_ATS_CONF 11
-#define PIN_ROOM_LIGHT 12
-#define PIN_LIGFT_DEF 13
-#define PIN_LIGHT_ON 14
-#define PIN_PANTO 15
-//MCP23S17接続ピン定義
+constexpr uint8_t PIN_ATS_CONF = 11;
+constexpr uint8_t PIN_ROOM_LIGHT = 12;
+constexpr uint8_t PIN_LIGHT_DEF = 13;
+constexpr uint8_t PIN_LIGHT_ON = 14;
+constexpr uint8_t PIN_PANTO = 15;
 
 //Arduino Micro接続ピン定義
-#define PIN_EB_SW 5
-#define PIN_DOOR_OUT 8
-#define PIN_ATS_REC 9
-#define PIN_BVE_MODE 12
-//Arduino Micro接続ピン定義
+constexpr uint8_t PIN_MCP3008_CS = 4;  //下の CS_BRK_* マクロ(PORTD bit4)と一致させること
+constexpr uint8_t PIN_EB_SW = 5;
+constexpr uint8_t PIN_DOOR_OUT = 8;
+constexpr uint8_t PIN_ATS_REC = 9;
+constexpr uint8_t PIN_BVE_MODE = 12;
 
 //MCP3008使用時SPI_SS定義
 #ifndef SIMPLE
-//#define SS_Brk 4  //MCP3008_Brk
 // Arduino Micro Pin 4 = PORTD Bit 4 (PD4)
 #define CS_BRK_LOW() (PORTD &= ~(1 << 4))  // 4番ピンをLOWにする
 #define CS_BRK_HIGH() (PORTD |= (1 << 4))  // 4番ピンをHIGHにする
 #endif
-//MCP3008使用時SPI_SS定義
 
 //SPI_SSピン(PB0)をレジスタで直接叩くためのマクロ
 #define CS_LOW() PORTB &= ~_BV(PB0)
 #define CS_HIGH() PORTB |= _BV(PB0)
-//SPI_SSピン(PB0)をレジスタで直接叩くためのマクロ
 
 //MCP4725デバイスのアドレス定義
-#define DAC1_ADDR 0x60
-#define DAC2_ADDR 0x61
-//MCP4725デバイスのアドレス定義
+constexpr uint8_t DAC1_ADDR = 0x60;  //速度計
+constexpr uint8_t DAC2_ADDR = 0x61;  //電圧計/電流計
 
-//↓デバッグのコメント(//)を解除するとシリアルモニタでデバッグできます
-//#define DEBUG
+//MCP23S17レジスタ定義
+constexpr uint8_t MCP23S17_OP_WRITE = 0x40;  //デバイスアドレス (A0-A2がGNDの場合)
+constexpr uint8_t MCP23S17_OP_READ = 0x41;   //0x40 | 0x01
+constexpr uint8_t MCP23S17_REG_IODIR = 0x00;
+constexpr uint8_t MCP23S17_REG_GPPU = 0x0C;
+constexpr uint8_t MCP23S17_REG_GPIO = 0x12;
+
+//MCP3008チャンネル割り当て
+constexpr uint8_t ADC_CH_BRAKE = 0;    //ブレーキ弁ポテンショ
+constexpr uint8_t ADC_CH_ATS_POS = 1;  //ATS確認位置
+constexpr uint8_t ADC_CH_B1 = 3;       //B1電源接点
+constexpr uint8_t ADC_CH_EB = 4;       //EB接点
+constexpr uint8_t ADC_CH_BTN_N = 5;    //ブレーキ位置調整ボタン(N)
+constexpr uint8_t ADC_CH_BTN_EB = 6;   //ブレーキ位置調整ボタン(EB)
+
+// ================================================
+// 設定ビット位置
+// ※ヘッダコメントの "Nbit" は1始まり。コード上のシフト量は N-1
+// ================================================
+enum InputFlipBit : uint8_t {  //074 set_InputFlip
+  FLIP_ATS_CONT = 0,           //警報持続
+                               //1: (ATS確認ボタン。現在は Ats_Conf_flip の bit0 を使用)
+  FLIP_ATS_REC = 2,            //ATS復帰ボタン
+  FLIP_EB = 3,                 //EB
+  FLIP_HORN1 = 4,              //警笛1
+  FLIP_HORN2 = 5,              //警笛2
+  FLIP_DEC_IS_EB = 6,          //0:抑速 1:非常
+  FLIP_SKIP_METER_TEST = 7     //0:メーター確認を実行 1:なし
+};
+
+enum AtsConfBit : uint8_t {     //076 Ats_Conf_flip
+  ATSCONF_ATS_CONF = 0,         //ATS確認ボタン 0:A接点 1:B接点
+  ATSCONF_PANTO_KEY_P = 1,      //パンタ下ボタン 0:Alt+F4 1:'P'
+  ATSCONF_B1_FROM_POT = 3,      //B1電源 0:接点 1:POT(自動帯有効時)
+  ATSCONF_ATSPWR_FROM_POT = 4,  //ATS電源 0:接点 1:POT
+  ATSCONF_TRANSFER_EB = 5,      //非常投入状態転送(36) 0:無効 1:有効
+  ATSCONF_MODE_SWITCH = 6       //0:常にBVEモード 1:PIN_BVE_MODE で模型/BVE切替
+};
+
+enum AutoAirBit : uint8_t {  //068 set_AutoAirBrake
+  AAB_ENABLE = 0,            //自動帯使用可否
+                             //1: AutoAirEX(未使用)
+  AAB_BVEEX = 2,             //BveEX
+  AAB_DIRECT_SEND = 3,       //直接伝送
+  AAB_TS185 = 4              //TS185
+};
+
+// ================================================
+// EEPROMアドレス
+// ================================================
+enum EepromAddr : uint8_t {
+  EE_POT_N = 0,
+  EE_POT_EB = 2,
+  EE_BRAKE_NOTCH_NUM = 4,
+  EE_BRAKE_SAP_ANGLE = 6,
+  EE_BRAKE_EB_ANGLE = 8,
+  EE_BRAKE_FULL_ANGLE = 10,
+  EE_SPEED_ADJUST_FIRST = 12,  //12～42(2刻み) set_SpeedAdjust[1]～[16]
+  EE_SPEED_ADJUST_LAST = 42,
+  EE_SPEED_LIMIT = 44,
+  EE_KAISEI_BRAKE = 46,
+  EE_CURRENT_METER_MODE = 48,
+  EE_CURRENT_LIMIT = 50,
+  EE_VEHICLE_RESISTANCE = 52,
+  EE_CHATTERING_FILTER = 54,
+  EE_BRAKE_67DEG = 56,
+  EE_BRAKE_10DEG = 58,
+  EE_AUTOAIR_1 = 60,
+  EE_AUTOAIR_2 = 62,
+  EE_BP_DOWN_SPAN = 64,
+  EE_BP_UP_SPAN = 66,
+  EE_AUTO_AIR_BRAKE = 68,
+  EE_MC_NOTCH_CONSOLE = 70,
+  EE_MC_NOTCH_BVE = 72,
+  EE_INPUT_FLIP = 74,
+  EE_ATS_CONF_FLIP = 76,
+  EE_AUTO_NOTCH_ADJUST = 78,
+  EE_AAB_REAL_AIR = 80,
+  EE_ATS_CONTACT = 82,
+  EE_ATS_DENGEN_ANGLE = 84,
+  EE_ID = 90,          //SELD"C"ontroller
+  EE_VERSION = 92,     //VersionData(4byte)
+  EE_INIT_FLAG = 100,   //初回書き込みフラグ
+  EE_ME48_EB_EN = 120  // ★新規追加：ME48非常抜取機能有効化(WR 120)
+};
+
+// ================================================
+// 電文(strbve)のレイアウト
+// "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/"
+// ================================================
+constexpr uint8_t MSG_SPEED = 0;        //速度(4桁)
+constexpr uint8_t MSG_DOOR = 5;         //戸閉 '1':閉
+constexpr uint8_t MSG_CURRENT = 7;      //電流(5桁)
+constexpr uint8_t MSG_LAMP_SAP = 17;    //直通ランプ
+constexpr uint8_t MSG_LAMP_DYN = 18;    //電制ランプ
+constexpr uint8_t MSG_EB = 36;          //非常
+constexpr uint8_t MSG_DIR = 44;         //レバーサ F/B/N
+constexpr uint8_t MSG_NOTCH_MARK = 47;  //'B':ブレーキノッチ情報あり
+constexpr uint8_t MSG_NOTCH_BRK = 48;   //ブレーキノッチ(16進3桁)
+constexpr uint8_t MSG_BC = 55;          //BC圧(3桁)
+constexpr uint8_t MSG_ER = 59;          //ER圧(3桁)
+constexpr uint8_t MSG_SAP = 63;         //SAP圧(3桁)
+constexpr uint8_t MSG_BP = 67;          //BP圧(3桁)
+constexpr uint8_t MSG_MIN_LEN_PRESSURE = 67;
+
+// ================================================
+// 型定義 (※関数より前に置くこと: Arduinoのプロトタイプ自動生成対策)
+// ================================================
+
+struct VersionData {
+  uint8_t major;
+  uint8_t minor;
+  uint8_t patch;
+  uint8_t build;
+};
+
+//EEPROM保存対象の設定項目
+struct SettingEntry {
+  uint8_t addr;
+  bool writable;  //false:WRコマンドで変更不可
+  uint16_t *var;
+};
+
+//チャタリング防止用カウンタ
+struct DebounceCounter {
+  uint8_t on;
+  uint8_t off;
+};
+
+//ブレーキ位置調整ボタンの状態
+struct PotCalibState {
+  uint16_t adj;
+  uint8_t mode;  //0:待機 1:平均化中 2:確定
+};
+
+// ================================================
+// グローバル変数
+// ================================================
 
 //MCP3008/23S17用SPI設定定義
-SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz MAX3.6MHz
-SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);  //1MHz MAX10MHz
+const SPISettings mcp3008settings = SPISettings(1000000, MSBFIRST, SPI_MODE0);   //1MHz MAX3.6MHz
+const SPISettings mcp23S17settings = SPISettings(4000000, MSBFIRST, SPI_MODE0);  //MAX10MHz
 
 uint16_t ioexp_1_AB = 0;
 uint16_t bve_speed = 0;
-int8_t notch_mc = 0;               //マスコンノッチ
-char notch_name[3];                //マスコンノッチ名称
-uint8_t notch_brk = 0;             //ブレーキノッチ
-uint8_t notch_brk_latch = 0;       //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
-uint8_t sap_notch_brk = 0;         //ブレーキノッチ(直通帯)
-String notch_brk_name = "";        //ブレーキノッチ名称
-String notch_brk_name_latch = "";  //ブレーキノッチ名称格納
-//以下ブレーキ設定値
+int8_t notch_mc = 0;                //マスコンノッチ
+char notch_prefix = 'P';            //マスコンノッチ名称の先頭文字 P:力行 H:抑速
+uint8_t notch_brk = 0;              //ブレーキノッチ
+uint8_t notch_brk_latch = 0;        //ブレーキノッチ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
+uint8_t sap_notch_brk = 0;          //ブレーキノッチ(直通帯)
+char notch_brk_name[6] = "";        //ブレーキノッチ名称 B0～B255,A0～A2,EB
+char notch_brk_name_latch[6] = "";  //ブレーキノッチ名称格納
 
+//以下ブレーキ設定値
 uint16_t set_BrakeNotchNum = 8;         //004 常用ブレーキ段数
 uint16_t set_BrakeSAPAngle = 80;        //006 直通帯の角度
 uint16_t set_BrakeEBAngle = 150;        //008 非常位置
@@ -201,12 +342,10 @@ uint16_t set_BrakeAutoAir2Angle = 135;  //062 重なり開始位置
 uint16_t BP_press = 490;                //BP管圧力
 uint16_t ER_press = 490;                //ER管圧力
 uint8_t brk_angl = 0;                   //ブレーキ弁角度
-//以上ブレーキ設定値
 
 //以下速度計補正値
 uint16_t set_SpeedAdjust[18] = { 0, 150, 400, 680, 1010, 1330, 1650, 2000, 2340, 2680, 3020, 3340, 3650, 4000, 4095, 4095, 4095, 4095 };
 uint16_t set_SpeedLimit = 120;  //044 速度上限
-//以上速度計補正値
 
 uint16_t use_KaiseiBrake = true;       //046 回生モード true:有効　false:無効
 uint16_t set_CurrentMeterMode = true;  //048 計器モード true:電圧計 false:電流計
@@ -214,25 +353,19 @@ uint16_t set_CurrentLimit = 750;       //050 電流上限
 uint16_t set_VehicleResistance = 500;  //052 列車抵抗
 uint16_t set_ChatteringFilter = 1;     //054 チャタリングフィルタ[°]
 
-int8_t iDir = 0;        //レバーサ
-int8_t iDir_latch = 0;  //レバーサ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
-char cDir[2] = "  ";
-char cDir_N[2] = "  ";
-
-//ATS
-bool Ats_Pos = 0;        //ATS確認位置
-bool Ats_Pos_latch = 0;  //ATS確認位置
+int8_t iDir = 0;          //レバーサ
+int8_t iDir_latch = 0;    //レバーサ格納 ※自動ノッチ合わせ機構でも使用するためグローバル変数
+char dir_prefix_N = ' ';  //模型モード用レバーサ名称 L:前進 R:後進 N:切 (送信時は後ろに空白1文字を付ける)
 
 uint16_t set_InputFlip = 0;       //074 ボタン反転(旧警報持続ボタン反転 0:B接点 1以上:A接点)0:B接点 1以上:A接点
 uint16_t Ats_Conf_flip = 0;       //076 ATS確認ボタン反転 0:B接点 1以上:A接点
 uint16_t use_AtsContact = 0;      //082 ATS接点判定使用
 uint16_t set_AtsDengenAngle = 0;  //084 ATS電源接点角度(ME48)
-//ATS
+uint16_t use_Me48Eb = 0;          //120 ME48非常抜取機能有効化 (0:無効 1:有効)
 
 //以下ブレーキ位置調整用
 uint16_t set_POT_N = 0;     //000
 uint16_t set_POT_EB = 512;  //002
-//以上ブレーキ位置調整用
 
 bool mode_POT = false;
 
@@ -241,17 +374,11 @@ bool modeBVE = true;
 bool modeN = false;
 
 //自動ブレーキ帯
-
 uint8_t bp_span = 20;
 uint8_t autoair_notch_brk = 0;
-uint8_t autoair_notch_brk_latch = 0;
 uint16_t set_BrakeBPDownSpan = 20;  //064 自動帯減圧インターバル
 uint16_t set_BrakeBPUpSpan = 20;    //066 自動帯増圧インターバル
 uint16_t set_AutoAirBrake = 1;      //068 自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185//V4.2.1.1変更
-bool use_AutoAirBrake = set_AutoAirBrake & 1;
-bool use_BveEX = set_AutoAirBrake >> 2 & 1;
-bool mode_TS185 = set_AutoAirBrake >> 4 & 1;
-bool use_AutoAirBrakeDirectSend = set_AutoAirBrake >> 3 & 1;
 bool notch_BrakeAAB = false;
 
 bool autoair_dir_mask = false;               //自動帯使用時方向切替をマスク
@@ -271,24 +398,15 @@ bool Pan_Mode = true;        //PAN 1:通電 PAN 0:停電
 bool Accident_Mode = false;  //ACD 1:事故 0:解除
 
 bool EB_JR_move_E = false;       //非常ブレーキ
-bool transfer_EB_state = false;  //後段に非常投入状態を転送
+bool transfer_EB_state = false;  //後段に非常投入状態を転送(0:しない 1:する) ※keyboard_control()で更新
 
-String tmp_ser1_s = "";
-
-String strbve0 = "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/";
+const char strbve0[] = "0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440F490S440P490/";
 String strbve = strbve0;
 String str = strbve0;
 String str_latch = str;
 
 bool flgFirstSend = false;  //078自動ノッチ合わせモード2のときに使用、004を受信時にtrue
 int16_t bve_current = 0;
-
-struct VersionData {
-  uint8_t major;
-  uint8_t minor;
-  uint8_t patch;
-  uint8_t build;
-};
 
 // #define の値を構造体にセット
 VersionData currentVersion = {
@@ -298,9 +416,191 @@ VersionData currentVersion = {
   VERSION_BUILD
 };
 
+//EEPROM保存対象の設定項目表(Flash上に配置)
+//※変数の初期値が工場出荷値。追加する場合はここに1行足す
+const SettingEntry SETTING_TABLE[] PROGMEM = {
+  { EE_POT_N, true, &set_POT_N },
+  { EE_POT_EB, true, &set_POT_EB },
+  { EE_BRAKE_NOTCH_NUM, true, &set_BrakeNotchNum },
+  { EE_BRAKE_SAP_ANGLE, true, &set_BrakeSAPAngle },
+  { EE_BRAKE_EB_ANGLE, true, &set_BrakeEBAngle },
+  { EE_BRAKE_FULL_ANGLE, true, &set_BrakeFullAngle },
+  { 12, true, &set_SpeedAdjust[1] },
+  { 14, true, &set_SpeedAdjust[2] },
+  { 16, true, &set_SpeedAdjust[3] },
+  { 18, true, &set_SpeedAdjust[4] },
+  { 20, true, &set_SpeedAdjust[5] },
+  { 22, true, &set_SpeedAdjust[6] },
+  { 24, true, &set_SpeedAdjust[7] },
+  { 26, true, &set_SpeedAdjust[8] },
+  { 28, true, &set_SpeedAdjust[9] },
+  { 30, true, &set_SpeedAdjust[10] },
+  { 32, true, &set_SpeedAdjust[11] },
+  { 34, true, &set_SpeedAdjust[12] },
+  { 36, true, &set_SpeedAdjust[13] },
+  { 38, true, &set_SpeedAdjust[14] },
+  { 40, true, &set_SpeedAdjust[15] },
+  { 42, true, &set_SpeedAdjust[16] },
+  { EE_SPEED_LIMIT, true, &set_SpeedLimit },
+  { EE_KAISEI_BRAKE, true, &use_KaiseiBrake },
+  { EE_CURRENT_METER_MODE, true, &set_CurrentMeterMode },
+  { EE_CURRENT_LIMIT, false, &set_CurrentLimit },  //※WRコマンドでは変更不可(従来仕様)
+  { EE_VEHICLE_RESISTANCE, true, &set_VehicleResistance },
+  { EE_CHATTERING_FILTER, true, &set_ChatteringFilter },
+  { EE_BRAKE_67DEG, true, &set_Brake67DegAngl },
+  { EE_BRAKE_10DEG, true, &set_Brake10DegAngl },
+  { EE_AUTOAIR_1, true, &set_BrakeAutoAir1Angle },
+  { EE_AUTOAIR_2, true, &set_BrakeAutoAir2Angle },
+  { EE_BP_DOWN_SPAN, true, &set_BrakeBPDownSpan },
+  { EE_BP_UP_SPAN, true, &set_BrakeBPUpSpan },
+  { EE_AUTO_AIR_BRAKE, true, &set_AutoAirBrake },
+  { EE_MC_NOTCH_CONSOLE, true, &set_MCNotchNumConsole },
+  { EE_MC_NOTCH_BVE, true, &set_MCNotchNumBVE },
+  { EE_INPUT_FLIP, true, &set_InputFlip },
+  { EE_ATS_CONF_FLIP, true, &Ats_Conf_flip },
+  { EE_AUTO_NOTCH_ADJUST, true, &Auto_Notch_Adjust },
+  { EE_AAB_REAL_AIR, true, &use_AAB_RealAir },
+  { EE_ATS_CONTACT, true, &use_AtsContact },
+  { EE_ATS_DENGEN_ANGLE, true, &set_AtsDengenAngle },
+  { EE_ME48_EB_EN, true, &use_Me48Eb },  // ★新規追加
+};
+constexpr uint8_t SETTING_COUNT = sizeof(SETTING_TABLE) / sizeof(SettingEntry);
+
+// ================================================
+// 汎用ヘルパー
+// ================================================
+
+inline bool bitOf(uint16_t value, uint8_t bit) {
+  return (value >> bit) & 1;
+}
+inline bool inputFlip(InputFlipBit bit) {
+  return bitOf(set_InputFlip, bit);
+}
+inline bool atsConfFlag(AtsConfBit bit) {
+  return bitOf(Ats_Conf_flip, bit);
+}
+
+//自動帯設定(068)から取り出す各フラグ(loop() の先頭で更新。1周の間は値を固定する従来動作)
+struct AutoAirFlags {
+  bool use;         //自動帯使用可否
+  bool bveEX;       //BveEX
+  bool directSend;  //直接伝送
+  bool ts185;       //TS185
+};
+AutoAirFlags autoAirFlags = { true, false, false, false };  //set_AutoAirBrake 初期値(1)に対応
+
+void updateAutoAirFlags() {
+  autoAirFlags.use = bitOf(set_AutoAirBrake, AAB_ENABLE);
+  autoAirFlags.bveEX = bitOf(set_AutoAirBrake, AAB_BVEEX);
+  autoAirFlags.directSend = bitOf(set_AutoAirBrake, AAB_DIRECT_SEND);
+  autoAirFlags.ts185 = bitOf(set_AutoAirBrake, AAB_TS185);
+}
+inline bool use_AutoAirBrake() {
+  return autoAirFlags.use;
+}
+inline bool use_BveEX() {
+  return autoAirFlags.bveEX;
+}
+inline bool use_AutoAirBrakeDirectSend() {
+  return autoAirFlags.directSend;
+}
+inline bool mode_TS185() {
+  return autoAirFlags.ts185;
+}
+
+
+//MCP23S17の入力が有効(Lowアクティブ)か
+inline bool pinActive(uint8_t pin) {
+  return (~ioexp_1_AB >> pin) & 1;
+}
+
+//USBシリアルが送信可能か
+inline bool usbWritable() {
+  return Serial && Serial.availableForWrite() > 32;
+}
+
+//値が前回から変化したか(変化時は latch を更新)
+inline bool changed(bool now, bool &latch) {
+  if (now == latch) return false;
+  latch = now;
+  return true;
+}
+
+//チャタリング防止: input が limit 回連続で同じ値になったら output を更新
+void debounce(bool input, bool &output, DebounceCounter &c, uint8_t limit) {
+  if (input) {
+    c.on++;
+    c.off = 0;
+  } else {
+    c.off++;
+    c.on = 0;
+  }
+  if (c.on >= limit) {
+    c.on = limit;
+    output = true;
+  } else if (c.off >= limit) {
+    c.off = limit;
+    output = false;
+  }
+}
+
+//ブレーキノッチ名称の設定
+void setBrakeName(const char *name) {
+  strncpy(notch_brk_name, name, sizeof(notch_brk_name) - 1);
+  notch_brk_name[sizeof(notch_brk_name) - 1] = '\0';
+}
+void setBrakeNameNumbered(uint8_t n) {  //"B"+段数
+  notch_brk_name[0] = 'B';
+  itoa(n, notch_brk_name + 1, 10);
+}
+
+//Serial1へ送信(必要ならUSBへモニター出力)
+void Serial1Print(const char *command, bool monitor) {
+  Serial1.print(command);
+  Serial1.print('\r');
+  if (monitor && usbWritable()) {
+    Serial.println(command);
+  }
+}
+void Serial1Print(const String &command, bool monitor) {
+  Serial1Print(command.c_str(), monitor);
+}
+
+//"TAG 0"/"TAG 1" 形式の電文を送信
+void Serial1PrintFlag(const char *tag, bool value, bool monitor) {
+  char buf[8];
+  uint8_t n = 0;
+  while (*tag && n < 4) {
+    buf[n++] = *tag++;
+  }
+  buf[n++] = ' ';
+  buf[n++] = value ? '1' : '0';
+  buf[n] = '\0';
+  Serial1Print(buf, monitor);
+}
+
+void Keyboard_Press_Release_BVE(bool pressed, uint8_t keycode) {
+  if (modeBVE) {
+    if (pressed) {
+      Keyboard.press(keycode);
+    } else {
+      Keyboard.release(keycode);
+    }
+  }
+}
+
+void Keyboard_Write_Repeat(uint8_t keycode, uint8_t times) {
+  while (times--) {
+    Keyboard.write(keycode);
+  }
+}
+
+// ================================================
+// setup / loop
+// ================================================
 
 void setup() {
-  pinMode(4, OUTPUT);                //MCP3008
+  pinMode(PIN_MCP3008_CS, OUTPUT);   //MCP3008
   pinMode(SS, OUTPUT);               //MCP23S17
   pinMode(PIN_EB_SW, INPUT_PULLUP);  //EBスイッチ
   pinMode(PIN_DOOR_OUT, OUTPUT);     //BVE_Door
@@ -314,10 +614,10 @@ void setup() {
   pinMode(3, INPUT_PULLUP);
 #endif
 
-  pinMode(9, INPUT_PULLUP);   //ATS復帰
-  pinMode(10, INPUT_PULLUP);  //予備
-  pinMode(11, INPUT_PULLUP);  //予備SW1
-  pinMode(12, INPUT_PULLUP);  //予備SW2
+  pinMode(PIN_ATS_REC, INPUT_PULLUP);   //ATS復帰
+  pinMode(10, INPUT_PULLUP);            //予備
+  pinMode(11, INPUT_PULLUP);            //予備SW1
+  pinMode(PIN_BVE_MODE, INPUT_PULLUP);  //予備SW2(模型/BVE切替)
 
   Serial.begin(115200);
   Serial1.begin(115200);
@@ -334,92 +634,20 @@ void setup() {
   SPI.begin();
   CS_HIGH();  // SSピンをHIGH（非選択状態）にする
 
-  // 3. MCP23S17 の全ピン設定 (16ピン一括)
-  // IODIR (0x00) に 0xFFFF を書き込んで全入力
-  mcpWrite16(0x00, 0xFFFF);
-  // GPPU (0x0C) に 0xFFFF を書き込んで全プルアップ有効
-  mcpWrite16(0x0C, 0xFFFF);
-  /*else{
-Serial.println("Error.");
-  }*/
+  // MCP23S17 の全ピン設定 (16ピン一括)
+  mcpWrite16(MCP23S17_REG_IODIR, 0xFFFF);  //全入力
+  mcpWrite16(MCP23S17_REG_GPPU, 0xFFFF);   //全プルアップ有効
 
-  //初回書き込みチェック
-  int16_t b = 0;
-  EEPROM.get(100, b);
-  if (b != 1) {
-    EEPROM.put(0, set_POT_N);                        //POT_N
-    EEPROM.put(2, set_POT_EB);                       //POT_EB
-    EEPROM.put(4, set_BrakeNotchNum);                //ブレーキ段数設定
-    EEPROM.put(6, set_BrakeSAPAngle);                //直通帯範囲
-    EEPROM.put(8, set_BrakeEBAngle);                 //非常位置
-    EEPROM.put(10, set_BrakeFullAngle);              //ブレーキ最大角度
-    for (int i = 1; i <= 16; i++) {                  //速度計補正値
-      EEPROM.put((i * 2) + 10, set_SpeedAdjust[i]);  //
-    }                                                //
-    EEPROM.put(44, set_SpeedLimit);                  //速度計上限
-    EEPROM.put(46, use_KaiseiBrake);                 //回生モード
-    EEPROM.put(48, set_CurrentMeterMode);            //計器モード
-    EEPROM.put(50, set_CurrentLimit);                //電流値上限
-    EEPROM.put(52, set_VehicleResistance);           //列車抵抗
-    EEPROM.put(54, set_ChatteringFilter);            //チャタリング
-    EEPROM.put(56, set_Brake67DegAngl);              //直通帯最大角度
-    EEPROM.put(58, set_Brake10DegAngl);              //直通帯最小角度
-    EEPROM.put(60, set_BrakeAutoAir1Angle);          //自動帯重なり開始位置
-    EEPROM.put(62, set_BrakeAutoAir2Angle);          //自動帯常用全開角度
-    EEPROM.put(64, set_BrakeBPDownSpan);             //自動帯減圧インターバル
-    EEPROM.put(66, set_BrakeBPUpSpan);               //自動帯増圧インターバル
-    EEPROM.put(68, set_AutoAirBrake);                //自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185//V4.2.1.1変更
-    EEPROM.put(70, set_MCNotchNumConsole);           //マスコンノッチ最大数
-    EEPROM.put(72, set_MCNotchNumBVE);               //マスコンノッチ数(車両)
-    EEPROM.put(74, set_InputFlip);                   //入力反転(旧警報持続ボタン反転) 0:B接点 1以上:A接点
-    EEPROM.put(76, Ats_Conf_flip);                   //ATS確認ボタン反転 0:B接点 1以上:A接点
-    EEPROM.put(78, Auto_Notch_Adjust);               //自動ノッチ合わせ
-    EEPROM.put(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
-    EEPROM.put(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
-    EEPROM.put(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
-    EEPROM.put(100, 1);                              //初回書き込みフラグセット
-  } else {
-    EEPROM.get(0, set_POT_N);                        //POT_N
-    EEPROM.get(2, set_POT_EB);                       //POT_EB
-    EEPROM.get(4, set_BrakeNotchNum);                //ブレーキ段数
-    EEPROM.get(6, set_BrakeSAPAngle);                //直通帯幅
-    EEPROM.get(8, set_BrakeEBAngle);                 //非常位置
-    EEPROM.get(10, set_BrakeFullAngle);              //ブレーキ最大角度
-    for (int i = 1; i <= 16; i++) {                  //速度計補正値
-      EEPROM.get((i * 2) + 10, set_SpeedAdjust[i]);  //
-    }                                                //
-    EEPROM.get(44, set_SpeedLimit);                  //速度計上限
-    EEPROM.get(46, use_KaiseiBrake);                 //回生モード
-    EEPROM.get(48, set_CurrentMeterMode);            //計器モード
-    EEPROM.get(50, set_CurrentLimit);                //電流値上限
-    EEPROM.get(52, set_VehicleResistance);           //列車抵抗
-    EEPROM.get(54, set_ChatteringFilter);            //チャタリング
-    EEPROM.get(56, set_Brake67DegAngl);              //直通帯最大角度
-    EEPROM.get(58, set_Brake10DegAngl);              //直通帯最小角度
-    EEPROM.get(60, set_BrakeAutoAir1Angle);          //自動帯重なり開始位置
-    EEPROM.get(62, set_BrakeAutoAir2Angle);          //自動帯常用全開角度
-    EEPROM.get(64, set_BrakeBPDownSpan);             //自動帯減圧インターバル
-    EEPROM.get(66, set_BrakeBPUpSpan);               //自動帯増圧インターバル
-    EEPROM.get(68, set_AutoAirBrake);                //自動帯使用可否 0bit:使用可否 bit1:AutoAirEX bit2:BveEX bit3:直接伝送 bit4:TS185//V4.2.1.1変更
-    EEPROM.get(70, set_MCNotchNumConsole);           //マスコンノッチ最大数
-    EEPROM.get(72, set_MCNotchNumBVE);               //マスコンノッチ数(車両)
-    EEPROM.get(74, set_InputFlip);                   //入力反転(旧警報持続ボタン反転) 0:B接点 1以上:A接点
-    EEPROM.get(76, Ats_Conf_flip);                   //ATS確認ボタン反転 0:B接点 1以上:A接点
-    EEPROM.get(78, Auto_Notch_Adjust);               //自動ノッチ合わせ
-    EEPROM.get(80, use_AAB_RealAir);                 //実際のエアー圧で自動帯再現
-    EEPROM.get(82, use_AtsContact);                  //ATS接点情報を他基板へ伝送
-    EEPROM.get(84, set_AtsDengenAngle);              //ATS電源接点角度(ME48)
-  }
-  EEPROM.put(90, 'C');  //SELD"C"ontroller
-  EEPROM.put(92, currentVersion);
-  if (Ats_Conf_flip >> 6 & 1) {
-    modeN = digitalRead(PIN_BVE_MODE);  //digitalRead(PIN_BVE_MODE);//PIN_BVE_MODE:12
-  } else {
-    modeN = false;
-  }
+  loadSettings();
+
+  EEPROM.put(EE_ID, 'C');  //SELD"C"ontroller
+  EEPROM.put(EE_VERSION, currentVersion);
+
+  modeN = atsConfFlag(ATSCONF_MODE_SWITCH) ? digitalRead(PIN_BVE_MODE) : false;
   modeBVE = !modeN;
+
   //速度計テスト
-  if (!(set_InputFlip >> 7 & 1)) {
+  if (!inputFlip(FLIP_SKIP_METER_TEST)) {
     disp_SpeedMeter(set_SpeedLimit * 10);
     delay(1500);
   }
@@ -428,10 +656,7 @@ Serial.println("Error.");
 }
 
 void loop() {
-  use_AutoAirBrake = set_AutoAirBrake & 1;
-  use_BveEX = set_AutoAirBrake >> 2 & 1;
-  use_AutoAirBrakeDirectSend = set_AutoAirBrake >> 3 & 1;
-  mode_TS185 = set_AutoAirBrake >> 4 & 1;
+  updateAutoAirFlags();      //自動帯設定フラグ更新
   read_USB();                //USB読込ルーチン
   read_Serial1();            //Serial1読込ルーチン
   read_ModeN();              //模型モード制御
@@ -442,7 +667,7 @@ void loop() {
   read_MC();                 //マスコンノッチ読込ルーチン
   read_Dir();                //マスコンレバーサ読込ルーチン
   read_Break();              //ブレーキハンドル読込ルーチン
-  read_Break_Setting();      //ブレーキハンドル読込ルーチン(未実装)
+  read_Break_Setting();      //ブレーキハンドル位置調整ルーチン
   read_Horn();               //ホーンペダル読込ルーチン
   read_Ats();                //ATS確認・警報持続読込ルーチン
   read_Panto();              //強制終了ルーチン
@@ -457,837 +682,88 @@ void loop() {
   }
 }
 
-// 16bit一括読み取り用の軽量関数
-uint16_t mcpRead16(uint8_t reg) {
-  SPI.beginTransaction(mcp23S17settings);
-  CS_LOW();
-  SPI.transfer(0x41);           // 読み込み用アドレス (0x40 | 0x01)
-  SPI.transfer(reg);            // 読み出し開始レジスタ (GPIO A: 0x12)
-  uint8_t a = SPI.transfer(0);  // Port A
-  uint8_t b = SPI.transfer(0);  // Port B
-  CS_HIGH();
-  SPI.endTransaction();
-  return (uint16_t)a | ((uint16_t)b << 8);
-}
+// ================================================
+// EEPROM設定の読み書き
+// ================================================
 
-// Flash節約用の軽量書き込み関数
-void mcpWrite16(uint8_t reg, uint16_t data) {
-  SPI.beginTransaction(mcp23S17settings);
-  CS_LOW();
-  SPI.transfer(0x40);         // デバイスアドレス (A0-A2がGNDの場合)
-  SPI.transfer(reg);          // 書き込み開始レジスタ
-  SPI.transfer(data & 0xFF);  // Port A
-  SPI.transfer(data >> 8);    // Port B (自動インクリメント)
-  CS_HIGH();
-  SPI.endTransaction();
-}
+//初回起動時は現在値(工場出荷値)を書き込み、2回目以降はEEPROMから読み出す
+void loadSettings() {
+  int16_t initialized = 0;
+  EEPROM.get(EE_INIT_FLAG, initialized);
+  const bool firstRun = (initialized != 1);
 
-// チャタリング防止付きの実行部分（修正版）
-void read_IOexp() {
-  // GPIOレジスタ(0x12)から読み取り
-  uint16_t current = mcpRead16(0x12);
-
-  // 【修正】すべての状態（0xFFFFも含め）でチャタリング確認を行う
-  // 3回連続一致を確認して確定
-  for (uint8_t i = 0; i < 2; i++) {
-    if (mcpRead16(0x12) != current) return;
-  }
-
-  // 値が確定したら、そのまま変数に代入
-  ioexp_1_AB = current;
-}
-
-//MCP3008ADコンバータ読取
-uint16_t adcRead(uint8_t ch) {  // 0 .. 7
-#ifndef SIMPLE
-  byte channelData = (ch + 8) << 4;
-  SPI.beginTransaction(mcp3008settings);
-  CS_BRK_LOW();
-  SPI.transfer(0b00000001);                   // Start bit 1
-  byte highByte = SPI.transfer(channelData);  // singleEnd
-  byte lowByte = SPI.transfer(0x00);          // dummy
-  CS_BRK_HIGH();
-  SPI.endTransaction();
-  return ((highByte & 0x03) << 8) + lowByte;
-#else
-  switch (ch) {
-    case 0:
-      return analogRead(A0);
-      break;
-    case 1:
-      return analogRead(A3);
-      break;
-  }
-#endif
-}
-
-//MCP23S17マスコンノッチ状態読込 (MC53抑速ブレーキ対応)
-void read_MC(void) {
-  if (!Accident_Mode) {
-    if (ioexp_1_AB >> PIN_MC_DEC & 1) {
-      if (set_InputFlip >> 6 & 1 && deadman) {  //非常有効時
-        deadman = false;
-      }
-      autoair_dir_mask = false;
-      if (~ioexp_1_AB >> PIN_MC_5 & 1) {
-        if (set_MCNotchNumConsole == 5) {
-          notch_mc = set_MCNotchNumBVE;
-        }
-      } else if (~ioexp_1_AB >> PIN_MC_4 & 1) {
-        if (set_MCNotchNumConsole == 4) {
-          notch_mc = set_MCNotchNumBVE;
-        } else if (set_MCNotchNumConsole == 5 && set_MCNotchNumBVE != 4) {
-          notch_mc = 4;
-        }
-      } else if (~ioexp_1_AB >> PIN_MC_3 & 1) {
-        notch_mc = 3;
-      } else if (~ioexp_1_AB >> PIN_MC_2 & 1) {
-        notch_mc = 2;
-      } else if (~ioexp_1_AB >> PIN_MC_1 & 1) {
-        notch_mc = 1;
-      } else {
-        notch_mc = 0;
-        //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
-        if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle) {
-          AutoAirMask();
-        }
-      }
+  SettingEntry e;
+  for (uint8_t i = 0; i < SETTING_COUNT; i++) {
+    memcpy_P(&e, &SETTING_TABLE[i], sizeof(SettingEntry));
+    if (firstRun) {
+      EEPROM.put(e.addr, *e.var);
     } else {
-      if (set_InputFlip >> 6 & 1 && !deadman) {  //非常有効時
-        //マスコンデッドマン仮実装
-        notch_mc = 0;
-        if (set_BrakeNotchNum > 0) {
-          notch_brk = set_BrakeNotchNum + 1;
-        }
-        notch_brk_name = "EB";
-        autoair_dir_mask = false;
-        deadman = true;
-      } else {                    //抑速有効時
-        if (!autoair_dir_mask) {  //自動ブレーキ使用時は抑速使用不可
-          notch_mc = -1;
-          uint8_t decBit = ~ioexp_1_AB >> 1 & B1111;
-          switch (decBit) {
-            case B0001:
-              notch_mc = -3;
-              break;
-            case B0010:
-              notch_mc = -2;
-              break;
-            case B0101:
-              notch_mc = -4;
-              break;
-            case B0110:
-              notch_mc = -5;
-              break;
-            case B1000:
-              notch_mc = -1;
-              break;
-          }
-        }
-      }
+      EEPROM.get(e.addr, *e.var);
     }
-  } else {
-    notch_mc = 0;
   }
-  notch_name[0] = (notch_mc >= 0) ? 'P' : 'H';
-  notch_name[1] = char(abs(notch_mc));
-}
-
-//マスコンレバーサ読取
-void read_Dir(void) {
-  if (!autoair_dir_mask) {
-    if ((~ioexp_1_AB >> PIN_MC_DIR_F & 1) && !Accident_Mode) {
-      iDir = 1;
-      cDir[0] = 'F';
-      cDir_N[0] = 'L';
-    } else if ((~ioexp_1_AB >> PIN_MC_DIR_B & 1) && !Accident_Mode) {
-      iDir = -1;
-      cDir[0] = 'B';
-      cDir_N[0] = 'R';
-    } else {
-      iDir = 0;
-      cDir[0] = 'N';
-      cDir_N[0] = 'N';
-    }
+  if (firstRun) {
+    EEPROM.put(EE_INIT_FLAG, (int16_t)1);  //初回書き込みフラグセット
   }
 }
 
-//ブレーキ角度読取
-void read_Break() {
-  if (!deadman) {
-    uint16_t adc_raw = adcRead(0);
-    static uint16_t adc_latch = 0;
-    uint16_t adc = adc_raw;
-    if (set_POT_N < set_POT_EB) {
-      if (adc < set_POT_N) {
-        adc = set_POT_N;
-      } else if (adc > set_POT_EB) {
-        adc = set_POT_EB;
-      }
-    }
-    brk_angl = map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle);
-
-    if (mode_POT) {
-      if (Serial && Serial.availableForWrite() > 32) {
-        char s0[8] = " Pot1: ";
-        s0[7] = '\0';
-        char s1[5];
-        s1[6] = '\0';
-        itoa(adc_raw + 10000, s1, 10);
-        s1[0] = '0';
-        Serial.print(s0);
-        Serial.print(s1);
-        char s2[7] = " Deg: ";
-        s2[6] = '\0';
-        char s3[5];
-        s3[4] = '\0';
-        itoa(brk_angl + 1000, s3, 10);
-        s3[0] = '0';
-        Serial.print(s2);
-        Serial.println(s3);
-      }
-    }
-
-    static uint8_t brk_angl_latch = brk_angl;
-    static bool notch_BrakeAAB_latch = notch_BrakeAAB;
-    //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
-    if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter) {
-
-      //直通帯の処理
-      if (brk_angl < set_BrakeSAPAngle) {
-        EB_latch = false;  //非常ラッチ解除 V4.1.2.8位置移動
-        if (set_BrakeNotchNum > 0) {
-          //N位置
-          if (brk_angl <= set_Brake10DegAngl) {
-            notch_brk = 0;
-            sap_notch_brk = 0;
-
-            //直通帯位置(※常用最大67°位置まで)
-          } else if (brk_angl < set_Brake67DegAngl) {
-            uint16_t temp_notch_brk = round((float)(brk_angl - set_Brake10DegAngl) / (float)(set_Brake67DegAngl - set_Brake10DegAngl) * (set_BrakeNotchNum - 1) + 0.5);
-            notch_brk = temp_notch_brk;
-            sap_notch_brk = notch_brk;
-
-            //常用最大67°位置～直通帯範囲まで
-          } else {
-            if (mode_TS185 && notch_BrakeAAB) {
-              Keyboard.write('K');
-            }
-            notch_brk = set_BrakeNotchNum;
-            sap_notch_brk = set_BrakeNotchNum;
-            autoair_dir_mask = false;
-            notch_BrakeAAB = false;
-          }
-        } else {
-          notch_brk = 0;
-          sap_notch_brk = 0;
-          autoair_dir_mask = false;
-          notch_BrakeAAB = false;
-        }
-        notch_brk_name = "B";
-        notch_brk_name += notch_brk;
-      }
-
-      //自動帯の処理
-      else if (brk_angl < set_BrakeEBAngle) {
-        if (use_AutoAirBrake) {
-          //抜き取り・保ち位置
-          if (brk_angl < set_BrakeAutoAir1Angle) {
-            if (mode_TS185) {
-              if (!notch_BrakeAAB) {
-                Keyboard.write(',');
-              }
-              Keyboard.release('.');
-            } else {
-              //4.2.1.8 TS185モード時以外、非常投入から抜取位置にしても非常を維持するよう変更
-              if (!EB_latch) {
-                notch_brk = 0;
-              }
-            }
-            notch_BrakeAAB = true;
-            notch_brk_name = "A0";
-            AutoAirMask();
-
-            //自動帯減圧位置(弱)
-          } else if (brk_angl < set_BrakeAutoAir2Angle) {
-            if (modeN || mode_POT) {
-              notch_brk_name = "A1";
-            } else {
-              if (mode_TS185) {
-                Keyboard.press('.');
-              }
-              //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
-              AutoAirMask();
-            }
-            //自動帯減圧位置(強)
-          } else {
-            if (modeN || mode_POT) {
-              notch_brk_name = "A2";
-            } else {
-              if (mode_TS185) {
-                Keyboard.press('.');
-              }
-              AutoAirMask();
-            }
-          }
-          //自動帯非使用時は直通帯常用最大扱い
-        } else {
-          notch_BrakeAAB = false;
-          notch_brk = set_BrakeNotchNum;
-          autoair_dir_mask = false;
-        }
-
-
-        //非常位置
-      } else {
-        notch_brk = set_BrakeNotchNum + 1;
-        notch_brk_name = "EB";
-        autoair_dir_mask = false;
-        EB_latch = true;
-      }
-      if ((notch_BrakeAAB != notch_BrakeAAB_latch) && !mode_TS185 && use_BveEX) {
-        if (Serial && Serial.availableForWrite() > 32) {
-          //Serial.print();
-          Serial.print("AAB ");
-          Serial.println(notch_BrakeAAB, BIN);
-        }
-      }
-      notch_BrakeAAB_latch = notch_BrakeAAB;
-      brk_angl_latch = brk_angl;
-    }
-
-    if (use_AutoAirBrake) {
-      BP_Sim();
-    }
-
-    //ポテンショ生データ表示モード
-    if (mode_POT) {
-      if (Serial && Serial.availableForWrite() > 32) {
-        Serial.print(" Notch: ");
-        Serial.print(notch_brk_name);
-        Serial.print(" BP: ");
-        Serial.print(BP_press);
-        Serial.print(" BP_notch: ");
-        Serial.print(autoair_notch_brk);
-      }
-    }
-    adc_latch = adc;
+bool findSetting(uint8_t addr, SettingEntry &out) {
+  for (uint8_t i = 0; i < SETTING_COUNT; i++) {
+    memcpy_P(&out, &SETTING_TABLE[i], sizeof(SettingEntry));
+    if (out.addr == addr) return true;
   }
+  return false;
 }
 
-//キーボード(HID)出力
-void keyboard_control(String &str) {
-  //後段に非常投入状態を転送(0:しない 1:する)
-  transfer_EB_state = (Ats_Conf_flip >> 5 & 1);
-  //マスコンノッチが前回と異なるとき
-  static int8_t notch_mc_latch = notch_mc;
-  if (notch_mc != notch_mc_latch) {
-    if (modeBVE) {
-      uint8_t d = abs(notch_mc - notch_mc_latch);
-      //力行ノッチ
-      if (notch_mc >= 0 && notch_mc_latch >= 0) {
-        for (uint8_t i = 0; i < d; i++) {
-          //進段
-          if ((notch_mc - notch_mc_latch) > 0) {
-            Keyboard.write('Z');
-          } else {
-            Keyboard.write('A');
-          }
-        }
-      } else {
-        //抑速ノッチ
-        //if (notch_mc <= 0 && notch_mc_latch <= 0 && notch_mc >= -5 && notch_mc_latch >= -5) {
-        //進段
-        for (uint8_t i = 0; i < d; i++) {
-          if ((notch_mc - notch_mc_latch) < 0) {
-            Keyboard.write('Q');
-            //戻し
-          } else {
-            Keyboard.write('A');
-          }
-        }
-      }
-      if (notch_mc >= 0 && notch_mc <= 3) {
-        tmp_ser1_s = "ATSM";
-        tmp_ser1_s += notch_mc;
-        Serial1Print(tmp_ser1_s, false);
-      }
-      //modeN
-    } else {
-      if (notch_brk == 0) {  //ブレーキ緩解
-        Serial1Print(String(notch_name[0]) + String(abs(notch_mc)), true);
-      }
-    }
-  }
-
-  //ブレーキノッチ(角度)が前回と異なるとき
-  if (notch_brk != notch_brk_latch || notch_brk_name != notch_brk_name_latch) {
-    uint8_t d = abs(notch_brk - notch_brk_latch);
-    //ブレーキノッチ
-    if (notch_brk >= 0 && notch_brk_latch >= 0 && notch_brk < (set_BrakeNotchNum + 1)) {
-      for (uint8_t i = 0; i < d; i++) {
-        //戻し
-        if ((notch_brk - notch_brk_latch) < 0) {
-          if (modeBVE) {
-            if (!mode_TS185) {
-              Keyboard.write(',');
-            } else {
-              Keyboard.write('K');
-            }
-          }
-        }
-        //ブレーキ
-        if ((notch_brk - notch_brk_latch) > 0) {
-          if (modeBVE) {
-            if (!mode_TS185) {
-              Keyboard.write('.');
-            } else {
-              Keyboard.write('L');
-            }
-          }
-        }
-      }
-    }
-    //非常
-    bool condition_EB_state = notch_brk == set_BrakeNotchNum + 1;
-    static bool condition_EB_state_latch = false;
-    if (condition_EB_state != condition_EB_state_latch) {
-      if (condition_EB_state) {
-        Keyboard.write('/');
-      }
-      if (transfer_EB_state) {
-        str.setCharAt(36, condition_EB_state + '0');
-        send_Serial1(str);
-      }
-      condition_EB_state_latch = condition_EB_state;
-    }
-
-    if (modeN) {
-      Serial1Print(notch_brk_name, true);
-    }
-  }
-
-  //レバーサが前回と異なるとき
-  if (iDir != iDir_latch) {
-    if (modeBVE) {
-      uint8_t d = abs(iDir - iDir_latch);
-      for (uint8_t i = 0; i < d; i++) {
-        //前進
-        if ((iDir - iDir_latch) > 0) {
-          Keyboard.write(KEY_UP_ARROW);  //"↑"
-          //後進
-        } else {
-          Keyboard.write(KEY_DOWN_ARROW);  //"↓"
-        }
-      }
-    } else {
-      //modeN
-      Serial1Print(String(cDir_N[0]) + String(cDir_N[1]), true);
-    }
-  }
-  notch_mc_latch = notch_mc;
-  notch_brk_latch = notch_brk;
-  notch_brk_name_latch = notch_brk_name;
-  autoair_notch_brk_latch = autoair_notch_brk;
-  iDir_latch = iDir;
-}
-
-//ブレーキ角度調整
-void read_Break_Setting(void) {
-  static uint16_t adj_N = 0;
-  static uint16_t adj_EB = 0;
-  static unsigned long iniMillis = 0;
-  static uint8_t setMode_N = 0;
-  static uint8_t setMode_EB = 0;
-  String s = "";
-  uint16_t value = 0;
-#ifndef SIMPLE
-  bool btn_n = (adcRead(5) < 512);
-  bool btn_eb = (adcRead(6) < 512);
-#else
-  bool btn_n = !digitalRead(3);
-  bool btn_eb = !digitalRead(2);
-#endif
-  if (btn_n) {
-    if (setMode_N == 0) {
-      adj_N = adcRead(0);
-      setMode_N = 1;
-      iniMillis = millis();
-      s = "POT_N = ";
-      s += EEPROM.get(0, value);
-      s += " ADC = ";
-      s += adj_N;
-    } else if (setMode_N == 1) {
-      if (millis() - iniMillis > 3000) {
-        setMode_N = 2;
-      }
-      adj_N = (adj_N * 9 + adcRead(0)) * 0.1;
-    } else if (setMode_N == 2) {
-      setMode_N = 0;
-      set_POT_N = adj_N;
-      EEPROM.put(0, set_POT_N);
-      s = "NEW POT_N = ";
-      s += set_POT_N;
-    }
-  } else {
-    setMode_N = 0;
-  }
-
-  if (btn_eb) {
-    if (setMode_EB == 0) {
-      adj_EB = adcRead(0);
-      setMode_EB = 1;
-      iniMillis = millis();
-      s = "POT_EB = ";
-      s += EEPROM.get(2, value);
-      s += " ADC = ";
-      s += adj_EB;
-    } else if (setMode_EB == 1) {
-      if (millis() - iniMillis > 3000) {
-        setMode_EB = 2;
-      }
-      adj_EB = (adj_EB * 9 + adcRead(0)) * 0.1;
-    } else if (setMode_EB == 2) {
-      setMode_EB = 0;
-      set_POT_EB = adj_EB;
-      EEPROM.put(2, set_POT_EB);
-      s = "NEW POT_EB = ";
-      s += set_POT_EB;
-    }
-  } else {
-    setMode_EB = 0;
-  }
-  if (s != "") {
-    if (Serial && Serial.availableForWrite() > 32) {
-      Serial.println(s);
-    }
-  }
-}
-
-void read_Horn(void) {
-  char s[1];
-  bool Horn_1 = (~ioexp_1_AB >> PIN_HORN_1 & 1) ^ (set_InputFlip >> 4 & 1);  //警笛1
-  static bool Horn_1_latch = Horn_1;
-  if (Horn_1 != Horn_1_latch) {
-    if (!mode_TS185) {
-      Keyboard_Press_Release_BVE(Horn_1, KEY_RETURN);  //Enter:0xB0
-    } else {
-      Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);  //BackSpace:0xB2
-    }
-    s[0] = '0' + Horn_1;
-    tmp_ser1_s = "HN1 ";
-    tmp_ser1_s += s[0];
-    Serial1Print(tmp_ser1_s, false);  //モニターしない
-    Horn_1_latch = Horn_1;
-  }
-
-  bool Horn_2 = (~ioexp_1_AB >> PIN_HORN_2 & 1) ^ (set_InputFlip >> 5 & 1);  //警笛2
-  static bool Horn_2_latch = Horn_2;
-  if (Horn_2 != Horn_2_latch) {
-    Keyboard_Press_Release_BVE(Horn_2, KEY_KP_PLUS);  //+:0xDF
-    s[0] = '0' + Horn_2;
-    tmp_ser1_s = "HN2 ";
-    tmp_ser1_s += s[0];
-    Serial1Print(tmp_ser1_s, false);  //モニターしない
-    Horn_2_latch = Horn_2;
-  }
-}
-
-bool In_and_Out(bool input, bool &output, uint8_t cycle_limit, uint8_t &cycle_on, uint8_t &cycle_off) {
-  if (input) {
-    cycle_on++;
-    cycle_off = 0;
-  } else {
-    cycle_off++;
-    cycle_on = 0;
-  }
-  if (cycle_on >= cycle_limit) {
-    cycle_on = cycle_limit;
-    output = true;
-  } else if (cycle_off >= cycle_limit) {
-    cycle_off = cycle_limit;
-    output = false;
-  }
-}
-
-void read_Ats(void) {
-  //ATS誤作動防止
-  static uint8_t Ats_In_Count_On = 0;   //ATS確認位置チャタリング防止用
-  static uint8_t Ats_In_Count_Off = 0;  //ATS確認位置チャタリング防止用
-  In_and_Out(adcRead(1) < 1, Ats_Pos, 10, Ats_In_Count_On, Ats_In_Count_Off);
-
-  //ATS確認位置転送
-  if (use_AtsContact) {
-    if (Ats_Pos != Ats_Pos_latch) {
-      char s[1];
-      s[0] = '0' + Ats_Pos;
-      tmp_ser1_s = "ATS ";
-      tmp_ser1_s += s[0];
-      Serial1Print(tmp_ser1_s, true);
-    }
-    Ats_Pos_latch = Ats_Pos;
-  }
-
-  //EB
-  static uint8_t EB_In_Count_On = 0;
-  static uint8_t EB_In_Count_Off = 0;
-  static bool EB_Pos = false;
-  In_and_Out(adcRead(4) < 1, EB_Pos, 10, EB_In_Count_On, EB_In_Count_Off);
-
-  if (EB_Pos) {
-    notch_brk = set_BrakeNotchNum + 1;
-    notch_brk_name = "EB";
-    autoair_dir_mask = false;
-    EB_latch = true;
-  }
-
-  //ATS警報持続
-  bool Ats_Cont = (~ioexp_1_AB >> PIN_ATS_CONT & 1) ^ (set_InputFlip & 1);  //警報持続スイッチ
-  static bool Ats_Cont_latch = Ats_Cont;                                    //警報持続スイッチ
-  if (Ats_Cont != Ats_Cont_latch) {
-    char s[1];
-    s[0] = '0' + Ats_Cont;
-    tmp_ser1_s = "ACT ";
-    tmp_ser1_s += s[0];
-    Serial1Print(tmp_ser1_s, true);
-    Keyboard_Press_Release_BVE(Ats_Cont, KEY_INSERT);  //Insert:0xD1
-    Ats_Cont_latch = Ats_Cont;
-  }
-
-  //ATS確認
-  bool Ats_Conf = (~ioexp_1_AB >> PIN_ATS_CONF & 1) ^ (Ats_Conf_flip & 1);  //ATS確認ボタン
-  static bool Ats_Conf_latch = Ats_Conf;                                    //ATS確認ボタン
-  if (Ats_Conf != Ats_Conf_latch) {
-    char s[1];
-    s[0] = '0' + Ats_Conf;
-    tmp_ser1_s = "ACF ";
-    tmp_ser1_s += s[0];
-    Serial1Print(tmp_ser1_s, true);
-    Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space:Keyboard.hに定義なし
-    Ats_Conf_latch = Ats_Conf;
-  }
-
-  //ATS復帰
-  bool Ats_Rec = !digitalRead(PIN_ATS_REC) ^ (set_InputFlip >> 2 & 1);
-  static bool Ats_Rec_latch = Ats_Rec;
-  if (Ats_Rec != Ats_Rec_latch) {
-    Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);
-    Ats_Rec_latch = Ats_Rec;
-  }
-
-  //ATS電源
-  bool ATS_Dengen = (brk_angl < set_AtsDengenAngle) && ((Ats_Conf_flip >> 4 & 1));
-  //bool ATS_Dengen = (brk_angl < set_AtsDengenAngle);
-  static bool ATS_Dengen_latch = ATS_Dengen;
-  if (ATS_Dengen != ATS_Dengen_latch) {
-    char s[1];
-    s[0] = '0' + ATS_Dengen;
-    tmp_ser1_s = "ADN ";
-    tmp_ser1_s += s[0];
-    Serial1Print(tmp_ser1_s, true);
-    ATS_Dengen_latch = ATS_Dengen;
-  }
-}
-
-void read_Panto(void) {
-  bool Panto = ~ioexp_1_AB >> PIN_PANTO & 1;
-  static bool Panto_latch = false;
-  if (Panto != Panto_latch) {
-    if (Ats_Conf_flip >> 1 & 1) {
-      if (Panto) Keyboard.write('P');
-    } else {
-      Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
-      Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
-      String str_pan = "PAN 0";
-      str = strbve0;
-      Serial1Print(str_pan, false);
-#ifndef SIMPLE
-      //dac2.setVoltage(0, false);
-      setVoltage(DAC2_ADDR, 0);
-#else
-      analogWrite(11, 0);
-#endif
-    }
-    Panto_latch = Panto;
-  }
-}
-
-void read_Light_Def(void) {
-  bool Light_Def = ~ioexp_1_AB & (1 << PIN_LIGFT_DEF);
-  static bool Light_Def_latch = Light_Def;
-  if (Light_Def != Light_Def_latch) {
-    Keyboard.write(KEY_PAGE_DOWN);
-    Light_Def_latch = Light_Def;
-  }
-}
-
-void read_Light(void) {
-  bool Light_On = ~ioexp_1_AB & (1 << PIN_LIGHT_ON);
-  static bool Light_On_latch = Light_On;
-  if (Light_On != Light_On_latch) {
-    Keyboard.write(KEY_PAGE_UP);
-    Light_On_latch = Light_On;
-  }
-}
-
-void read_EB(void) {
-  bool EB_SW = !digitalRead(PIN_EB_SW) ^ (set_InputFlip >> 3 & 1);
-  static bool EB_SW_latch = false;
-  if (EB_SW != EB_SW_latch) {
-    Keyboard_Press_Release_BVE(EB_SW, KEY_DELETE);  //Delete:0xD4
-    EB_SW_latch = EB_SW;
-  }
-}
-
-void disp_SpeedMeter(uint16_t spd) {
-  //速度計のリミットを適用
-  if (spd > (set_SpeedLimit * 10)) {
-    spd = (set_SpeedLimit * 10);
-  }
-
-  uint16_t volt = 0;
-  for (int i = 1; i < 18; i++) {
-    if (spd <= (i * 100)) {
-      volt = map(spd, (i - 1) * 100, i * 100, set_SpeedAdjust[i - 1], set_SpeedAdjust[i]);
-      break;
-    }
-  }
-#ifndef SIMPLE
-  //dac.setVoltage(volt, false);
-  setVoltage(DAC1_ADDR, volt);
-#else
-  analogWrite(10, volt >> 4);
-#endif
-}
-
-void BP_Sim() {
-  if (!use_AAB_RealAir) {
-    //BPの増減圧インターバルを設定
-    if (brk_angl < set_BrakeAutoAir1Angle) {
-      bp_span = set_BrakeBPUpSpan;
-    } else if ((brk_angl >= set_BrakeAutoAir1Angle) && (brk_angl <= set_BrakeAutoAir2Angle)) {
-      bp_span = map(brk_angl, set_BrakeAutoAir1Angle, set_BrakeAutoAir2Angle, set_BrakeBPDownSpan, set_BrakeBPDownSpan);
-    } else if (brk_angl > set_BrakeAutoAir2Angle) {
-      bp_span = set_BrakeBPDownSpan;
-    }
-
-    static unsigned long bp_millis = 0;
-    static unsigned long er_millis = 0;
-    if (EB_JR_move_E) {
-      BP_ER_EB_Control(bp_millis, er_millis);
-    } else {
-      //直通帯(運転位置)でBP,ERを加圧
-      if (brk_angl < set_BrakeSAPAngle) {
-        if ((millis() - bp_millis) > bp_span) {
-          if (BP_press < 490) {
-            BP_press++;
-          }
-          if (ER_press < 490) {
-            ER_press++;
-          }
-          bp_millis = millis();
-        }
-        //重なり位置でBP,ERは維持
-      } else if (brk_angl < set_BrakeAutoAir1Angle) {
-
-        //常用位置でBPとER圧を減圧
-      } else if (brk_angl < set_BrakeEBAngle) {
-        if ((millis() - bp_millis) > bp_span) {
-          if (BP_press > 0) {
-            BP_press--;
-          }
-          if (ER_press > 0) {
-            ER_press--;
-          }
-          bp_millis = millis();
-        }
-
-        //非常位置
-      } else if (brk_angl >= set_BrakeEBAngle) {
-        BP_ER_EB_Control(bp_millis, er_millis);
-      }
-    }
-
-    //BC圧をBP圧より生成
-    press_BC_Sim = (490 - BP_press) * 3.3;  //暫定
-    //非常吐出なく、自動帯常用でBC圧力が440kPa以上のとき440kPaとする
-    if (press_BC_Sim > 440) {
-      if (brk_angl < set_BrakeEBAngle && !EB_latch) {
-        press_BC_Sim = 440;
-      }
-    }
-    //非常動作時
-    if (press_BC_Sim > 490) {  //計算上のBC圧が490より上のとき
-      if (brk_angl >= set_BrakeEBAngle || EB_latch) {
-        press_BC_Sim = 490;
-      }
-    }
-  } else {
-    press_BC_Sim = BC_press;
-  }  ////////
-
-  //自動帯使用時に圧力をノッチに変換(BveEXを使用しない場合)
-  //BveEX使用時、ノッチはB0固定
-  if (!use_BveEX) {
-    //BC圧からブレーキノッチに変換
-    if (EB_latch) {
-      autoair_notch_brk = set_BrakeNotchNum + 1;
-    } else {
-      if (set_BrakeNotchNum > 0) {
-        autoair_notch_brk = map(press_BC_Sim, 0, 440, 0, set_BrakeNotchNum);
-      }
-    }
-  }
-  //自動帯圧力優先シーケンス
-  //N位置
-  if (brk_angl <= set_Brake10DegAngl) {
-    //自動ブレーキ
-    if (autoair_notch_brk >= 0) {  //自動ブレーキ帯の段数が(N位置より)高いとき
-      notch_brk = autoair_notch_brk;
-      if (!use_BveEX) {
-        strbve.setCharAt(17, '0');  //直通ランプ消灯
-      }
-    }
-    //直通帯位置
-  } else if (brk_angl < set_BrakeSAPAngle) {
-    //自動ブレーキ
-    if (notch_brk < autoair_notch_brk) {  //自動ブレーキ帯の段数が高いとき
-      notch_brk = autoair_notch_brk;
-      if (!use_BveEX) {
-        strbve.setCharAt(17, '1');  //直通ランプ点灯
-      }
-    }
-
-    //自動帯(BveEX非使用時のとき)
-  } else if (brk_angl < set_BrakeEBAngle && !use_BveEX) {  //自動ブレーキ
-    if (notch_brk < autoair_notch_brk) {                   //自動ブレーキ帯の段数が高いとき
-      notch_brk = autoair_notch_brk;
-    }
-  }
-}
-
-void BP_ER_EB_Control(unsigned long &bp_millis, unsigned long &er_millis) {
-  //BPを急減圧
-  if ((millis() - bp_millis) > 20) {
-    if (BP_press > 0) {
-      BP_press -= 10;
-      if (BP_press < 10) {
-        BP_press = 0;
-      }
-    }
-    bp_millis = millis();
-  }
-  //ER圧を減圧
-  if ((millis() - er_millis) > bp_span) {
-    if (ER_press > 0) {
-      ER_press--;
-    }
-    er_millis = millis();
+//WRコマンドの値が不正か
+bool isSettingRejected(uint8_t addr, uint16_t num) {
+  switch (addr) {
+    case EE_POT_N:
+    case EE_POT_EB:
+      return num > 1023;
+    case EE_BRAKE_NOTCH_NUM:
+      return num > 255;
+    case EE_BRAKE_SAP_ANGLE:
+      return num == 0 || num > set_BrakeEBAngle;
+    case EE_BRAKE_EB_ANGLE:
+      return num == 0 || num > set_BrakeFullAngle;
+    case EE_BRAKE_FULL_ANGLE:
+      return num == 0 || num > 255;
+    case EE_SPEED_LIMIT:
+      return num == 0;
+    case EE_KAISEI_BRAKE:
+    case EE_CURRENT_METER_MODE:
+      return num > 1;
+    case EE_VEHICLE_RESISTANCE:
+      return num == 0;
+    case EE_CHATTERING_FILTER:
+      return num > 3;
+    case EE_BRAKE_67DEG:
+      return num == 0 || num > set_BrakeSAPAngle;
+    case EE_BRAKE_10DEG:
+      return num == 0 || num > set_Brake67DegAngl;
+    case EE_AUTOAIR_1:
+    case EE_AUTOAIR_2:
+      return num < set_Brake67DegAngl || num > set_BrakeEBAngle;
+    case EE_BP_DOWN_SPAN:
+    case EE_BP_UP_SPAN:
+      return num == 0 || num > 100;
+    case EE_AUTO_AIR_BRAKE:
+      return num > 255;
+    case EE_AUTO_NOTCH_ADJUST:
+      return num > 2;
+    case EE_AAB_REAL_AIR:
+    case EE_ATS_CONTACT:
+    case EE_ME48_EB_EN:  // ★新規追加（0か1のみ許可）
+      return num > 1;
+    case EE_ATS_DENGEN_ANGLE:
+      return num > 255;
+    default:  //速度計補正、マスコンノッチ数、入力反転など(範囲チェックなし)
+      return false;
   }
 }
 
 //EEPROM読書用
-String rw_eeprom(uint8_t &dev, uint16_t &n, uint16_t &param, bool write, bool NGcondition) {
+String rw_eeprom(uint8_t dev, uint16_t n, uint16_t &param, bool write, bool NGcondition) {
   String s = "OK ";
   if (!NGcondition) {
     if (write) {
@@ -1313,28 +789,158 @@ String rw_eeprom(uint8_t &dev, uint16_t &n, uint16_t &param, bool write, bool NG
   return s;
 }
 
-//ノッチ自動調整 BVEからの入力に対して現在状態の比較を行い、ラッチに格納することでメインループで自動的に修正する
-void AutoNotch(String &str) {
-  if (str.length() > 49 && (Auto_Notch_Adjust == 1 || (Auto_Notch_Adjust == 2 && flgFirstSend)) && !autoair_dir_mask) {
-    if (str.charAt(47) == 'B') {
-      switch (str.charAt(44)) {
-        case 'F':
-          iDir_latch = 1;
-          break;
-        case 'B':
-          iDir_latch = -1;
-          break;
-        default:
-          iDir_latch = 0;
-      }
-      char Buf[4];
-      Buf[0] = str.charAt(48);
-      Buf[1] = str.charAt(49);
-      Buf[2] = str.charAt(50);
-      notch_brk_latch = strtol(Buf, NULL, 16);  //16進数→10進数に変換
-    }
-    flgFirstSend = false;
+//WRコマンド処理
+String set_Settings(uint8_t device, uint16_t num) {
+  SettingEntry e;
+  if (!findSetting(device, e) || !e.writable) {
+    return "E0";
   }
+
+  String s = rw_eeprom(device, num, *e.var, true, isSettingRejected(device, num));
+
+  switch (device) {
+    case EE_BRAKE_NOTCH_NUM:
+      if (Auto_Notch_Adjust == 2) {
+        flgFirstSend = true;
+      }
+      flg_set_BrakeNotchNum_changed = true;
+      break;
+    case EE_AUTO_NOTCH_ADJUST:
+      //開始時または変更時にフラグをtrue　AutoNotch内でフラグ解除
+      if (Auto_Notch_Adjust == 2) {
+        flgFirstSend = true;
+      }
+      break;
+    default:
+      break;
+  }
+
+  //速度計調整時は、調整中の速度を表示
+  if (device >= EE_SPEED_ADJUST_FIRST && device <= EE_SPEED_ADJUST_LAST) {
+    bve_speed = ((device - 10) / 2) * 100;
+  }
+  return s;
+}
+
+void modeN_set() {
+  set_BrakeNotchNum = 8;
+  EEPROM.put(EE_BRAKE_NOTCH_NUM, set_BrakeNotchNum);
+  EEPROM.get(EE_MC_NOTCH_CONSOLE, set_MCNotchNumConsole);
+  set_MCNotchNumBVE = set_MCNotchNumConsole;
+  EEPROM.put(EE_MC_NOTCH_BVE, set_MCNotchNumBVE);
+}
+
+// ================================================
+// ハードウェア入出力
+// ================================================
+
+// 16bit一括読み取り用の軽量関数
+uint16_t mcpRead16(uint8_t reg) {
+  SPI.beginTransaction(mcp23S17settings);
+  CS_LOW();
+  SPI.transfer(MCP23S17_OP_READ);
+  SPI.transfer(reg);            // 読み出し開始レジスタ
+  uint8_t a = SPI.transfer(0);  // Port A
+  uint8_t b = SPI.transfer(0);  // Port B
+  CS_HIGH();
+  SPI.endTransaction();
+  return (uint16_t)a | ((uint16_t)b << 8);
+}
+
+// Flash節約用の軽量書き込み関数
+void mcpWrite16(uint8_t reg, uint16_t data) {
+  SPI.beginTransaction(mcp23S17settings);
+  CS_LOW();
+  SPI.transfer(MCP23S17_OP_WRITE);
+  SPI.transfer(reg);          // 書き込み開始レジスタ
+  SPI.transfer(data & 0xFF);  // Port A
+  SPI.transfer(data >> 8);    // Port B (自動インクリメント)
+  CS_HIGH();
+  SPI.endTransaction();
+}
+
+// チャタリング防止付きの実行部分
+void read_IOexp() {
+  uint16_t current = mcpRead16(MCP23S17_REG_GPIO);
+
+  // 3回連続一致を確認して確定(0xFFFFも含め全状態で確認)
+  for (uint8_t i = 0; i < 2; i++) {
+    if (mcpRead16(MCP23S17_REG_GPIO) != current) return;
+  }
+
+  ioexp_1_AB = current;
+}
+
+//MCP3008ADコンバータ読取
+uint16_t adcRead(uint8_t ch) {  // 0 .. 7
+#ifndef SIMPLE
+  byte channelData = (ch + 8) << 4;
+  SPI.beginTransaction(mcp3008settings);
+  CS_BRK_LOW();
+  SPI.transfer(0b00000001);                   // Start bit 1
+  byte highByte = SPI.transfer(channelData);  // singleEnd
+  byte lowByte = SPI.transfer(0x00);          // dummy
+  CS_BRK_HIGH();
+  SPI.endTransaction();
+  return ((highByte & 0x03) << 8) + lowByte;
+#else
+  switch (ch) {
+    case ADC_CH_BRAKE:
+      return analogRead(A0);
+    case ADC_CH_ATS_POS:
+      return analogRead(A3);
+    default:  //SIMPLE構成に存在しないチャンネルは「未入力(最大値)」を返す
+      return 1023;
+  }
+#endif
+}
+
+//DAC1:速度計 (12bit)
+void outputSpeedMeter(uint16_t value) {
+#ifndef SIMPLE
+  setVoltage(DAC1_ADDR, value);
+#else
+  analogWrite(10, value >> 4);
+#endif
+}
+
+//DAC2:電圧計/電流計 (12bit)
+void outputCurrentMeter(uint16_t value) {
+#ifndef SIMPLE
+  setVoltage(DAC2_ADDR, value);
+#else
+  analogWrite(11, value >> 4);
+#endif
+}
+
+void setVoltage(uint8_t address, uint16_t voltage) {
+  // 範囲外の値を防ぐ（0〜4095）
+  if (voltage > 4095) voltage = 4095;
+
+  Wire.beginTransmission(address);
+
+  // Fast Mode (上位4bitに0x00) + 電圧上位4bit
+  Wire.write((voltage >> 8) & 0x0F);
+  // 電圧下位8bit
+  Wire.write(voltage & 0xFF);
+
+  Wire.endTransmission();
+}
+
+void disp_SpeedMeter(uint16_t spd) {
+  //速度計のリミットを適用
+  if (spd > (set_SpeedLimit * 10)) {
+    spd = (set_SpeedLimit * 10);
+  }
+
+  uint16_t volt = 0;
+  for (int i = 1; i < 18; i++) {
+    if (spd <= (i * 100)) {
+      volt = map(spd, (i - 1) * 100, i * 100, set_SpeedAdjust[i - 1], set_SpeedAdjust[i]);
+      break;
+    }
+  }
+  outputSpeedMeter(volt);
 }
 
 //電圧電流計表示用
@@ -1352,14 +958,7 @@ void disp_CurrentMeter(int16_t current) {
         v = 2000;
       }
     }
-    //出力
-#ifndef SIMPLE
-    //dac2.setVoltage(map(v, 0, 2000, 0, 4095), false);
-    setVoltage(DAC2_ADDR, map(v, 0, 2000, 0, 4095));
-#else
-    //analogWrite(11, map(v, 0, 2000, 0, 4095) / 4);
-    analogWrite(11, map(v, 0, 2000, 0, 4095) >> 4);
-#endif
+    outputCurrentMeter(map(v, 0, 2000, 0, 4095));
     //電流計モードの時
   } else {
     //電流計は正のみ(現状)
@@ -1368,311 +967,19 @@ void disp_CurrentMeter(int16_t current) {
     if (curr > set_CurrentLimit) {
       curr = set_CurrentLimit;
     }
-    //出力
-#ifndef SIMPLE
-    //dac2.setVoltage(map(curr, 0, set_CurrentLimit, 0, 4095), false);
-    setVoltage(DAC2_ADDR, map(curr, 0, set_CurrentLimit, 0, 4095));
-#else
-    //analogWrite(11, map(curr, 0, set_CurrentLimit, 0, 4095) / 4));
-    analogWrite(11, map(curr, 0, set_CurrentLimit, 0, 4095) >> 4));
-#endif
+    outputCurrentMeter(map(curr, 0, set_CurrentLimit, 0, 4095));
   }
 }
 
-void read_Serial1() {
-  if (Serial1.available() > 0) {
-    str = Serial1.readStringUntil('\r');
-    str.trim();
-    // 次の文字が LF ('\n') なら、バッファから1文字読み飛ばす（CRLF対策）
-    if (Serial1.peek() == '\n') {
-      Serial1.read();
-    }
-  }
-}
+// ================================================
+// マスコン・レバーサ
+// ================================================
 
-void read_USB() {
-  if (Serial.available()) {
-    str = Serial.readStringUntil('\r');
-  }
-  str.trim();
-  // 次の文字が LF ('\n') なら、バッファから1文字読み飛ばす（CRLF対策）
-  if (Serial.peek() == '\n') {
-    Serial.read();
-  }
-}
-
-void send_Serial1(String &str) {
-  if (use_AutoAirBrake) {
-    //自動帯有効で自動帯投入時、直通ランプと電制を無効とする
-    if (brk_angl > set_BrakeSAPAngle) {
-      if (str.length() > 18) {
-        if (!use_BveEX) {
-          str.setCharAt(17, '0');  //直通ランプ
-          str.setCharAt(18, '0');  //電制ランプ
-        }
-      }
-    }
-    //自動帯シミュレーション時、BC、BP、SAPの演算結果をSerial1へ転送する(直接転送モード以外)
-    if (!use_AAB_RealAir && !use_AutoAirBrakeDirectSend) {
-      static bool sap_auto_mask = false;
-      //"0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440E490S440P490/";
-      BC_press = press_BC_Sim;  //BCの演算結果を代入
-
-      //現在BC圧よりもBVEからのBC圧が高い場合はBVEを優先し
-      //逆の場合で直通帯のときBVEの圧力を優先する
-      if (bve_BC_press > BC_press) {
-        if (!sap_auto_mask) {
-          BC_press = bve_BC_press;
-        }
-      } else {
-        if (!sap_auto_mask) {
-          if (brk_angl < set_BrakeSAPAngle) {
-            BC_press = bve_BC_press;
-          }
-        }
-      }
-
-      setStringAt(55, str, BC_press);
-      //BP
-      setStringAt(67, str, BP_press);
-      //ER
-      setStringAt(59, str, ER_press);
-
-      //SAPread_Serial1
-      static uint16_t sap_press_latch = bve_SAP_press;
-      static unsigned long sap_millis = millis();
-      static bool sap_latch = false;
-      if (brk_angl <= set_BrakeSAPAngle) {
-        if (sap_latch && sap_press_latch <= 435) {
-          if ((bve_SAP_press - sap_press_latch) > 50) {
-            sap_press_latch += 5;
-          } else {
-            sap_latch = false;
-          }
-        }
-        if (!sap_latch) {
-          if (!sap_auto_mask) {
-            sap_press_latch = bve_SAP_press;
-          } else {
-            if (set_BrakeNotchNum > 0) {
-              uint16_t tmp_sap_press = map(sap_notch_brk, 0, set_BrakeNotchNum, 0, 440);
-              if (tmp_sap_press > bve_SAP_press) {
-                sap_auto_mask = false;
-              }
-            }
-          }
-        }
-      }
-      if (brk_angl > set_BrakeSAPAngle) {
-        sap_latch = true;
-        sap_auto_mask = true;
-        if (millis() - sap_millis > 20) {
-          if (sap_press_latch >= 5) {
-            sap_press_latch -= 5;
-          }
-          if (sap_press_latch < 5) {
-            sap_press_latch = 0;
-          }
-        }
-      }
-      setStringAt(63, str, sap_press_latch);
-    }
-  }
-  //非常
-  if (transfer_EB_state && notch_brk == set_BrakeNotchNum + 1) {
-    str.setCharAt(36, '1');
-  }
-
-  Serial1.print(str);
-  Serial1.print('\r');
-}
-
-String set_Settings(uint8_t &device, uint16_t &num) {
-  String s = "";
-  switch (device) {
-    //緩め位置設定
-    case 0:
-      s = rw_eeprom(device, num, set_POT_N, true, num < 0 || num > 1023);
-      break;
-
-    //非常位置設定
-    case 2:
-      s = rw_eeprom(device, num, set_POT_EB, true, num < 0 || num > 1023);
-      break;
-
-    //ブレーキ段数
-    case 4:
-      s = rw_eeprom(device, num, set_BrakeNotchNum, true, num < 0 || num > 255);
-      if (Auto_Notch_Adjust == 2) {
-        flgFirstSend = true;
-      }
-      flg_set_BrakeNotchNum_changed = true;
-      break;
-
-    //直通帯幅
-    case 6:
-      s = rw_eeprom(device, num, set_BrakeSAPAngle, true, num == 0 || num > set_BrakeEBAngle);
-
-      break;
-
-    //非常位置
-    case 8:
-      s = rw_eeprom(device, num, set_BrakeEBAngle, true, num == 0 || num > set_BrakeFullAngle);
-      break;
-
-    //ブレーキ最大角度
-    case 10:
-      s = rw_eeprom(device, num, set_BrakeFullAngle, true, num == 0 || num > 255);
-      break;
-
-    //速度計調整
-    case 12:
-    case 14:
-    case 16:
-    case 18:
-    case 20:
-    case 22:
-    case 24:
-    case 26:
-    case 28:
-    case 30:
-    case 32:
-    case 34:
-    case 36:
-    case 38:
-    case 40:
-    case 42:
-      s = rw_eeprom(device, num, set_SpeedAdjust[(device - 10) / 2], true, false);
-      bve_speed = ((device - 10) / 2) * 100;
-      break;
-
-    //最高速度設定
-    case 44:
-      s = rw_eeprom(device, num, set_SpeedLimit, true, num == 0);
-      break;
-
-    //回生モード
-    case 46:
-      s = rw_eeprom(device, num, use_KaiseiBrake, true, num > 1);
-      break;
-
-    //計器モード
-    case 48:
-      s = rw_eeprom(device, num, set_CurrentMeterMode, true, num > 1);
-      break;
-    case 52:  //列車抵抗
-      s = rw_eeprom(device, num, set_VehicleResistance, true, num == 0);
-      break;
-    case 54:  //チャタリング
-      s = rw_eeprom(device, num, set_ChatteringFilter, true, num < 0 || num > 3);
-      break;
-    case 56:  //常用最大角度
-      s = rw_eeprom(device, num, set_Brake67DegAngl, true, num == 0 || num > set_BrakeSAPAngle);
-      break;
-    case 58:  //直通帯最小角度
-      s = rw_eeprom(device, num, set_Brake10DegAngl, true, num == 0 || num > set_Brake67DegAngl);
-      break;
-    case 60:  //自動帯常用開始角度
-      s = rw_eeprom(device, num, set_BrakeAutoAir1Angle, true, num < set_Brake67DegAngl || num > set_BrakeEBAngle);
-      break;
-    case 62:  //自動帯常用全開角度
-      s = rw_eeprom(device, num, set_BrakeAutoAir2Angle, true, num < set_Brake67DegAngl || num > set_BrakeEBAngle);
-      break;
-    case 64:  //自動帯減圧インターバル
-      s = rw_eeprom(device, num, set_BrakeBPDownSpan, true, num == 0 || num > 100);
-      break;
-    case 66:  //自動帯増圧インターバル
-      s = rw_eeprom(device, num, set_BrakeBPUpSpan, true, num == 0 || num > 100);
-      break;
-    case 68:  //自動帯使用可否
-      s = rw_eeprom(device, num, set_AutoAirBrake, true, num < 0 || num > 255);
-      break;
-    case 70:  //マスコンノッチ最大数
-      s = rw_eeprom(device, num, set_MCNotchNumConsole, true, num < 0);
-      break;
-    case 72:  //マスコンノッチ数(車両)
-      s = rw_eeprom(device, num, set_MCNotchNumBVE, true, num < 0);
-      break;
-    case 74:  //警報持続ボタン反転 0:B接点 1以上:A接点
-      s = rw_eeprom(device, num, set_InputFlip, true, num < 0 || num > 65535);
-      break;
-    case 76:  //ATS確認ボタン反転 0:B接点 1以上:A接点
-      s = rw_eeprom(device, num, Ats_Conf_flip, true, num < 0 || num > 65535);
-      break;
-    case 78:  //自動ノッチ合わせ
-      s = rw_eeprom(device, num, Auto_Notch_Adjust, true, num < 0 || num > 2);
-      //開始時または変更時にフラグをtrue　AutoNotch内でフラグ解除
-      if (Auto_Notch_Adjust == 2) {
-        flgFirstSend = true;
-      }
-      break;
-    case 80:  //実際のエアー圧で自動帯再現
-      s = rw_eeprom(device, num, use_AAB_RealAir, true, num < 0 || num > 1);
-      break;
-    case 82:  //ATS接点情報を他基板へ伝送
-      s = rw_eeprom(device, num, use_AtsContact, true, num < 0 || num > 1);
-      break;
-    case 84:  //ATS電源接点角度(ME48)
-      s = rw_eeprom(device, num, set_AtsDengenAngle, true, num < 0 || num > 255);
-      break;
-
-    default:
-      s = "E0";
-      break;
-  }
-  return s;
-}
-
-void setStringAt(uint8_t startIndex, String &str, uint16_t &value) {
-  uint16_t d[3];
-  d[0] = value / 100 + 0x30;
-  d[1] = value / 10 % 10 + 0x30;
-  d[2] = value % 10 + 0x30;
-
-  if (str.length() >= 67) {
-    for (int i = 0; i < 3; i++) {
-      str.setCharAt(startIndex + i, char(d[i]));
-    }
-  }
-}
-
-void Serial1Print(String &command, bool monitor) {
-  Serial1.print(command);
-  Serial1.print('\r');
-  if (monitor) {
-    if (Serial && Serial.availableForWrite() > 32) {
-      Serial.println(command);
-    }
-  }
-}
-
-void KeyPut(String &str) {
-  if (str.length() > 4) {
-    if (str.indexOf("0x") > 0) {
-      char c_str[5];
-      str.substring(4, 8).toCharArray(c_str, 5);
-      Keyboard.write(strtol(c_str, NULL, 0));
-    } else {
-      char c = str.charAt(4);
-      Keyboard.write(c);
-    }
-  }
-}
-
-void Keyboard_Press_Release_BVE(bool &condition, byte keycode) {
-  if (modeBVE) {
-    if (condition) {
-      Keyboard.press(keycode);
-    } else {
-      Keyboard.release(keycode);
-    }
-  }
-}
-
+//自動帯使用時の方向切替マスク
 void AutoAirMask() {
   //マスコンノッチが0、BVEモード時でBveEXモード以外とTS185以外のとき、
   //レバーサ0、レバーサマスクをtrue
-  if (use_AutoAirBrake && notch_mc <= 0 && modeBVE && !use_BveEX && !mode_TS185) {
+  if (use_AutoAirBrake() && notch_mc <= 0 && modeBVE && !use_BveEX() && !mode_TS185()) {
     autoair_dir_mask = true;
     iDir = 0;
     //マスコンノッチが0以外の時はレバーサマスクをfalse
@@ -1681,40 +988,565 @@ void AutoAirMask() {
   }
 }
 
-void modeN_set() {
-  set_BrakeNotchNum = 8;
-  EEPROM.put(4, set_BrakeNotchNum);
-  EEPROM.get(70, set_MCNotchNumConsole);
-  set_MCNotchNumBVE = set_MCNotchNumConsole;
-  EEPROM.put(72, set_MCNotchNumBVE);
+//抑速ノッチ(MC53)デコード: ioexp bit1～4 の反転値 → ノッチ
+int8_t decodeDecelNotch(uint8_t decBit) {
+  switch (decBit) {
+    case 0b0001:
+      return -3;
+    case 0b0010:
+      return -2;
+    case 0b0101:
+      return -4;
+    case 0b0110:
+      return -5;
+    case 0b1000:
+      return -1;
+    default:
+      return -1;
+  }
 }
 
-void setVoltage(uint8_t address, uint16_t voltage) {
-  // 範囲外の値を防ぐ（0〜4095）
-  if (voltage > 4095) voltage = 4095;
+//MCP23S17マスコンノッチ状態読込 (MC53抑速ブレーキ対応)
+void read_MC(void) {
+  if (Accident_Mode) {
+    notch_mc = 0;
+  } else if ((ioexp_1_AB >> PIN_MC_DEC) & 1) {
+    //力行ノッチ
+    if (inputFlip(FLIP_DEC_IS_EB) && deadman) {  //非常有効時
+      deadman = false;
+    }
+    autoair_dir_mask = false;
+    if (pinActive(PIN_MC_5)) {
+      if (set_MCNotchNumConsole == 5) {
+        notch_mc = set_MCNotchNumBVE;
+      }
+    } else if (pinActive(PIN_MC_4)) {
+      if (set_MCNotchNumConsole == 4) {
+        notch_mc = set_MCNotchNumBVE;
+      } else if (set_MCNotchNumConsole == 5 && set_MCNotchNumBVE != 4) {
+        notch_mc = 4;
+      }
+    } else if (pinActive(PIN_MC_3)) {
+      notch_mc = 3;
+    } else if (pinActive(PIN_MC_2)) {
+      notch_mc = 2;
+    } else if (pinActive(PIN_MC_1)) {
+      notch_mc = 1;
+    } else {
+      notch_mc = 0;
+      //マスコンノッチが0でブレーキが自動帯にあるときはレバーサ0、レバーサマスクをtrue、ただしBveEXモード時を除く
+      if (brk_angl > set_BrakeSAPAngle && brk_angl < set_BrakeEBAngle) {
+        AutoAirMask();
+      }
+    }
+  } else if (inputFlip(FLIP_DEC_IS_EB) && !deadman) {  //非常有効時
+    //マスコンデッドマン仮実装
+    notch_mc = 0;
+    if (set_BrakeNotchNum > 0) {
+      notch_brk = set_BrakeNotchNum + 1;
+    }
+    setBrakeName("EB");
+    autoair_dir_mask = false;
+    deadman = true;
+  } else if (!autoair_dir_mask) {  //抑速有効時(自動ブレーキ使用時は抑速使用不可)
+    notch_mc = decodeDecelNotch((~ioexp_1_AB >> 1) & 0x0F);
+  }
 
-  Wire.beginTransmission(address);
+  notch_prefix = (notch_mc >= 0) ? 'P' : 'H';
+}
 
-  // Fast Mode (上位4bitに0x00) + 電圧上位4bit
-  Wire.write((voltage >> 8) & 0x0F);
-  // 電圧下位8bit
-  Wire.write(voltage & 0xFF);
+//マスコンレバーサ読取
+void read_Dir(void) {
+  if (!autoair_dir_mask) {
+    if (pinActive(PIN_MC_DIR_F) && !Accident_Mode) {
+      iDir = 1;
+      dir_prefix_N = 'L';
+    } else if (pinActive(PIN_MC_DIR_B) && !Accident_Mode) {
+      iDir = -1;
+      dir_prefix_N = 'R';
+    } else {
+      iDir = 0;
+      dir_prefix_N = 'N';
+    }
+  }
+}
 
-  Wire.endTransmission();
+// ================================================
+// ブレーキ弁
+// ================================================
+
+//ブレーキ弁ADC値 → 角度[°]
+//N位置とEB位置の大小は問わない(ポテンショの+とGNDを逆に接続した場合は N > EB となる)
+uint8_t adcToBrakeAngle(uint16_t adc) {
+  if (set_POT_N == set_POT_EB) {  //未調整(同値)のときは0除算を避ける
+    return 0;
+  }
+  const uint16_t potMin = (set_POT_N < set_POT_EB) ? set_POT_N : set_POT_EB;
+  const uint16_t potMax = (set_POT_N < set_POT_EB) ? set_POT_EB : set_POT_N;
+  if (adc < potMin) {
+    adc = potMin;
+  } else if (adc > potMax) {
+    adc = potMax;
+  }
+  return static_cast<uint8_t>(map(adc, set_POT_N, set_POT_EB, 0, set_BrakeFullAngle));
+}
+
+//ポテンショ生データ表示モード: ADC値と角度
+void debugPrintPot(uint16_t adc_raw) {
+  if (!usbWritable()) return;
+  char sPot[7];
+  itoa(adc_raw + 10000, sPot, 10);  //"1xxxx" の先頭を '0' にして5桁ゼロ埋め
+  sPot[0] = '0';
+  char sDeg[6];
+  itoa(brk_angl + 1000, sDeg, 10);  //"1xxx" の先頭を '0' にして4桁ゼロ埋め
+  sDeg[0] = '0';
+  Serial.print(" Pot1: ");
+  Serial.print(sPot);
+  Serial.print(" Deg: ");
+  Serial.println(sDeg);
+}
+
+//ポテンショ生データ表示モード: ノッチとBP
+void debugPrintNotch() {
+  if (!usbWritable()) return;
+  Serial.print(" Notch: ");
+  Serial.print(notch_brk_name);
+  Serial.print(" BP: ");
+  Serial.print(BP_press);
+  Serial.print(" BP_notch: ");
+  Serial.print(autoair_notch_brk);
+}
+
+//直通帯の処理
+void updateNotchSap() {
+  EB_latch = false;  //非常ラッチ解除 V4.1.2.8位置移動
+  if (set_BrakeNotchNum > 0) {
+    //N位置
+    if (brk_angl <= set_Brake10DegAngl) {
+      notch_brk = 0;
+      sap_notch_brk = 0;
+
+      //直通帯位置(※常用最大67°位置まで)
+    } else if (brk_angl < set_Brake67DegAngl) {
+      uint16_t temp_notch_brk = round((float)(brk_angl - set_Brake10DegAngl) / (float)(set_Brake67DegAngl - set_Brake10DegAngl) * (set_BrakeNotchNum - 1) + 0.5);
+      notch_brk = temp_notch_brk;
+      sap_notch_brk = notch_brk;
+
+      //常用最大67°位置～直通帯範囲まで
+    } else {
+      if (mode_TS185() && notch_BrakeAAB) {
+        Keyboard.write('K');
+      }
+      notch_brk = set_BrakeNotchNum;
+      sap_notch_brk = set_BrakeNotchNum;
+      autoair_dir_mask = false;
+      notch_BrakeAAB = false;
+    }
+  } else {
+    notch_brk = 0;
+    sap_notch_brk = 0;
+    autoair_dir_mask = false;
+    notch_BrakeAAB = false;
+  }
+  setBrakeNameNumbered(notch_brk);
+}
+
+//自動帯の処理
+void updateNotchAutoAir() {
+  //自動帯非使用時は直通帯常用最大扱い
+  if (!use_AutoAirBrake()) {
+    notch_BrakeAAB = false;
+    notch_brk = set_BrakeNotchNum;
+    autoair_dir_mask = false;
+    return;
+  }
+
+  //抜き取り・保ち位置
+  if (brk_angl < set_BrakeAutoAir1Angle) {
+    if (mode_TS185()) {
+      if (!notch_BrakeAAB) {
+        Keyboard.write(',');
+      }
+      Keyboard.release('.');
+    } else {
+      //4.2.1.8 TS185モード時以外、非常投入から抜取位置にしても非常を維持するよう変更
+      if (!EB_latch) {
+        notch_brk = 0;
+      }
+    }
+    notch_BrakeAAB = true;
+    setBrakeName("A0");
+    AutoAirMask();
+    return;
+  }
+
+  //自動帯減圧位置(弱:A1 / 強:A2)
+  if (modeN || mode_POT) {
+    setBrakeName(brk_angl < set_BrakeAutoAir2Angle ? "A1" : "A2");
+  } else {
+    if (mode_TS185()) {
+      Keyboard.press('.');
+    }
+    //ブレーキ弁が自動帯にあり、マスコンノッチが0のときレバーサ0、レバーサマスクをtrueに、ただし模型モード以外またはBveEXモード以外のときを除く
+    AutoAirMask();
+  }
+}
+
+//非常位置の処理
+void updateNotchEmergency() {
+  notch_brk = set_BrakeNotchNum + 1;
+  setBrakeName("EB");
+  autoair_dir_mask = false;
+  EB_latch = true;
+}
+
+//ブレーキ角度読取
+void read_Break() {
+  if (deadman) return;
+
+  uint16_t adc_raw = adcRead(ADC_CH_BRAKE);
+  brk_angl = adcToBrakeAngle(adc_raw);
+
+  if (mode_POT) {
+    debugPrintPot(adc_raw);
+  }
+
+  static uint8_t brk_angl_latch = brk_angl;
+  static bool notch_BrakeAAB_latch = notch_BrakeAAB;
+  //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
+  if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter) {
+    if (brk_angl < set_BrakeSAPAngle) {
+      updateNotchSap();
+    } else if (brk_angl < set_BrakeEBAngle) {
+      updateNotchAutoAir();
+    } else {
+      updateNotchEmergency();
+    }
+
+    if ((notch_BrakeAAB != notch_BrakeAAB_latch) && !mode_TS185() && use_BveEX()) {
+      if (usbWritable()) {
+        Serial.print("AAB ");
+        Serial.println(notch_BrakeAAB, BIN);
+      }
+    }
+    notch_BrakeAAB_latch = notch_BrakeAAB;
+    brk_angl_latch = brk_angl;
+  }
+
+  if (use_AutoAirBrake()) {
+    BP_Sim();
+  }
+
+  if (mode_POT) {
+    debugPrintNotch();
+  }
+}
+
+//ブレーキ位置調整ボタン1個分の処理。メッセージを作った場合 true
+bool updatePotCalib(bool pressed, PotCalibState &st, unsigned long &iniMillis, uint16_t &target,
+                    uint8_t eepromAddr, const char *label, String &msg) {
+  if (!pressed) {
+    st.mode = 0;
+    return false;
+  }
+
+  uint16_t value = 0;
+  if (st.mode == 0) {
+    st.adj = adcRead(ADC_CH_BRAKE);
+    st.mode = 1;
+    iniMillis = millis();
+    msg = label;
+    msg += " = ";
+    msg += EEPROM.get(eepromAddr, value);
+    msg += " ADC = ";
+    msg += st.adj;
+    return true;
+  } else if (st.mode == 1) {
+    if (millis() - iniMillis > 3000) {
+      st.mode = 2;
+    }
+    st.adj = (st.adj * 9 + adcRead(ADC_CH_BRAKE)) * 0.1;
+  } else if (st.mode == 2) {
+    st.mode = 0;
+    target = st.adj;
+    EEPROM.put(eepromAddr, target);
+    msg = "NEW ";
+    msg += label;
+    msg += " = ";
+    msg += target;
+    return true;
+  }
+  return false;
+}
+
+//ブレーキ角度調整
+void read_Break_Setting(void) {
+  static PotCalibState stN = { 0, 0 };
+  static PotCalibState stEB = { 0, 0 };
+  static unsigned long iniMillis = 0;
+  String s = "";
+#ifndef SIMPLE
+  bool btn_n = (adcRead(ADC_CH_BTN_N) < 512);
+  bool btn_eb = (adcRead(ADC_CH_BTN_EB) < 512);
+#else
+  bool btn_n = !digitalRead(3);
+  bool btn_eb = !digitalRead(2);
+#endif
+  updatePotCalib(btn_n, stN, iniMillis, set_POT_N, EE_POT_N, "POT_N", s);
+  updatePotCalib(btn_eb, stEB, iniMillis, set_POT_EB, EE_POT_EB, "POT_EB", s);
+
+  if (s.length() > 0 && usbWritable()) {
+    Serial.println(s);
+  }
+}
+
+// ================================================
+// キーボード(HID)出力
+// ================================================
+
+//マスコンノッチが前回と異なるとき
+void sendMasconKeys() {
+  static int8_t notch_mc_latch = notch_mc;
+  if (notch_mc != notch_mc_latch) {
+    if (modeBVE) {
+      uint8_t d = abs(notch_mc - notch_mc_latch);
+      if (notch_mc >= 0 && notch_mc_latch >= 0) {
+        //力行ノッチ 進段:Z 戻し:A
+        Keyboard_Write_Repeat((notch_mc > notch_mc_latch) ? 'Z' : 'A', d);
+      } else {
+        //抑速ノッチ 進段:Q 戻し:A
+        Keyboard_Write_Repeat((notch_mc < notch_mc_latch) ? 'Q' : 'A', d);
+      }
+      if (notch_mc >= 0 && notch_mc <= 3) {
+        char msg[6] = "ATSM0";
+        msg[4] = '0' + notch_mc;
+        Serial1Print(msg, false);
+      }
+    } else {
+      //modeN
+      if (notch_brk == 0) {  //ブレーキ緩解
+        char msg[8];
+        msg[0] = notch_prefix;
+        itoa(abs(notch_mc), msg + 1, 10);
+        Serial1Print(msg, true);
+      }
+    }
+  }
+  notch_mc_latch = notch_mc;
+}
+
+//ブレーキノッチ(角度)が前回と異なるとき
+void sendBrakeKeys(String &str) {
+  if (notch_brk != notch_brk_latch || strcmp(notch_brk_name, notch_brk_name_latch) != 0) {
+    //ブレーキノッチ(非常を除く) 戻し:','(TS185:'K') ブレーキ:'.'(TS185:'L')
+    if (modeBVE && notch_brk < (set_BrakeNotchNum + 1)) {
+      uint8_t d = abs(notch_brk - notch_brk_latch);
+      if (notch_brk < notch_brk_latch) {
+        Keyboard_Write_Repeat(mode_TS185() ? 'K' : ',', d);
+      } else if (notch_brk > notch_brk_latch) {
+        Keyboard_Write_Repeat(mode_TS185() ? 'L' : '.', d);
+      }
+    }
+
+    //非常
+    bool condition_EB_state = notch_brk == set_BrakeNotchNum + 1;
+    static bool condition_EB_state_latch = false;
+    if (changed(condition_EB_state, condition_EB_state_latch)) {
+      if (condition_EB_state) {
+        Keyboard.write('/');
+      }
+      if (transfer_EB_state) {
+        str.setCharAt(MSG_EB, condition_EB_state + '0');
+        send_Serial1(str);
+      }
+    }
+
+    if (modeN) {
+      Serial1Print(notch_brk_name, true);
+    }
+  }
+  notch_brk_latch = notch_brk;
+  strcpy(notch_brk_name_latch, notch_brk_name);
+}
+
+//レバーサが前回と異なるとき
+void sendReverserKeys() {
+  if (iDir != iDir_latch) {
+    if (modeBVE) {
+      //前進:↑ 後進:↓
+      Keyboard_Write_Repeat((iDir > iDir_latch) ? KEY_UP_ARROW : KEY_DOWN_ARROW, abs(iDir - iDir_latch));
+    } else {
+      //modeN (電文は2文字: 名称+空白)
+      char msg[3] = { dir_prefix_N, ' ', '\0' };
+      Serial1Print(msg, true);
+    }
+  }
+  iDir_latch = iDir;
+}
+
+//キーボード(HID)出力
+void keyboard_control(String &str) {
+  transfer_EB_state = atsConfFlag(ATSCONF_TRANSFER_EB);
+  sendMasconKeys();
+  sendBrakeKeys(str);
+  sendReverserKeys();
+}
+
+void KeyPut(String &str) {
+  if (str.length() > 4) {
+    if (str.indexOf("0x") > 0) {
+      char c_str[5];
+      str.substring(4, 8).toCharArray(c_str, 5);
+      Keyboard.write(static_cast<uint8_t>(strtol(c_str, NULL, 0)));
+    } else {
+      char c = str.charAt(4);
+      Keyboard.write(c);
+    }
+  }
+}
+
+// ================================================
+// スイッチ類
+// ================================================
+
+void read_Horn(void) {
+  bool Horn_1 = pinActive(PIN_HORN_1) != inputFlip(FLIP_HORN1);  //警笛1
+  static bool Horn_1_latch = Horn_1;
+  if (changed(Horn_1, Horn_1_latch)) {
+    if (!mode_TS185()) {
+      Keyboard_Press_Release_BVE(Horn_1, KEY_RETURN);  //Enter:0xB0
+    } else {
+      Keyboard_Press_Release_BVE(Horn_1, KEY_BACKSPACE);  //BackSpace:0xB2
+    }
+    Serial1PrintFlag("HN1", Horn_1, false);  //モニターしない
+  }
+
+  bool Horn_2 = pinActive(PIN_HORN_2) != inputFlip(FLIP_HORN2);  //警笛2
+  static bool Horn_2_latch = Horn_2;
+  if (changed(Horn_2, Horn_2_latch)) {
+    Keyboard_Press_Release_BVE(Horn_2, KEY_KP_PLUS);  //+:0xDF
+    Serial1PrintFlag("HN2", Horn_2, false);           //モニターしない
+  }
+}
+
+void read_Ats(void) {
+  //ATS確認位置(誤作動防止のためチャタリング防止)
+  static bool Ats_Pos = false;
+  static bool Ats_Pos_latch = false;
+  static DebounceCounter Ats_Pos_cnt = { 0, 0 };
+  debounce(adcRead(ADC_CH_ATS_POS) < 1, Ats_Pos, Ats_Pos_cnt, 10);
+
+  //ATS確認位置転送
+  if (use_AtsContact) {
+    if (Ats_Pos != Ats_Pos_latch) {
+      Serial1PrintFlag("ATS", Ats_Pos, true);
+    }
+    Ats_Pos_latch = Ats_Pos;
+  }
+
+  //EB
+  static DebounceCounter EB_cnt = { 0, 0 };
+  static bool EB_Pos = false;
+  debounce(adcRead(ADC_CH_EB) < 1, EB_Pos, EB_cnt, 10);
+
+  if (EB_Pos) {
+    notch_brk = set_BrakeNotchNum + 1;
+    setBrakeName("EB");
+    autoair_dir_mask = false;
+    EB_latch = true;
+  }
+
+  //ATS警報持続
+  bool Ats_Cont = pinActive(PIN_ATS_CONT) != inputFlip(FLIP_ATS_CONT);  //警報持続スイッチ
+  static bool Ats_Cont_latch = Ats_Cont;
+  if (changed(Ats_Cont, Ats_Cont_latch)) {
+    Serial1PrintFlag("ACT", Ats_Cont, true);
+    Keyboard_Press_Release_BVE(Ats_Cont, KEY_INSERT);  //Insert:0xD1
+  }
+
+  //ATS確認
+  bool Ats_Conf = pinActive(PIN_ATS_CONF) != atsConfFlag(ATSCONF_ATS_CONF);  //ATS確認ボタン
+  static bool Ats_Conf_latch = Ats_Conf;
+  if (changed(Ats_Conf, Ats_Conf_latch)) {
+    Serial1PrintFlag("ACF", Ats_Conf, true);
+    Keyboard_Press_Release_BVE(Ats_Conf, 0x20);  //Space:Keyboard.hに定義なし
+  }
+
+  //ATS復帰
+  bool Ats_Rec = !digitalRead(PIN_ATS_REC) != inputFlip(FLIP_ATS_REC);
+  static bool Ats_Rec_latch = Ats_Rec;
+  if (changed(Ats_Rec, Ats_Rec_latch)) {
+    Keyboard_Press_Release_BVE(Ats_Rec, KEY_HOME);
+  }
+
+  //ME48非常抜取 / ME49電源判定
+  bool ME48_EbPull = false;
+  if (atsConfFlag(ATSCONF_ATSPWR_FROM_POT)) {
+    if (use_Me48Eb != 0) {
+      // WR 120 1 : ME48非常抜取モード（設定角度未満で有効）
+      ME48_EbPull = (brk_angl < set_AtsDengenAngle);
+    } else {
+      // WR 120 0 : ME49モード（直通帯以下 または 自動帯A1以上で有効、間のA0帯で無効）
+      ME48_EbPull = (brk_angl <= set_BrakeSAPAngle) || (brk_angl >= set_BrakeAutoAir1Angle);
+    }
+  }
+
+  static bool ME48_EbPull_latch = ME48_EbPull;
+  if (changed(ME48_EbPull, ME48_EbPull_latch)) {
+    Serial1PrintFlag("ADN", ME48_EbPull, true);
+  }
+}
+
+void read_Panto(void) {
+  bool Panto = pinActive(PIN_PANTO);
+  static bool Panto_latch = false;
+  if (changed(Panto, Panto_latch)) {
+    if (atsConfFlag(ATSCONF_PANTO_KEY_P)) {
+      if (Panto) Keyboard.write('P');
+    } else {
+      Keyboard_Press_Release_BVE(Panto, KEY_LEFT_ALT);  //Alt:0x82
+      Keyboard_Press_Release_BVE(Panto, KEY_F4);        //F40xC5
+      str = strbve0;
+      Serial1Print("PAN 0", false);
+      outputCurrentMeter(0);
+    }
+  }
+}
+
+void read_Light_Def(void) {
+  bool Light_Def = pinActive(PIN_LIGHT_DEF);
+  static bool Light_Def_latch = Light_Def;
+  if (changed(Light_Def, Light_Def_latch)) {
+    Keyboard.write(KEY_PAGE_DOWN);
+  }
+}
+
+void read_Light(void) {
+  bool Light_On = pinActive(PIN_LIGHT_ON);
+  static bool Light_On_latch = Light_On;
+  if (changed(Light_On, Light_On_latch)) {
+    Keyboard.write(KEY_PAGE_UP);
+  }
+}
+
+void read_EB(void) {
+  bool EB_SW = !digitalRead(PIN_EB_SW) != inputFlip(FLIP_EB);
+  static bool EB_SW_latch = false;
+  if (changed(EB_SW, EB_SW_latch)) {
+    Keyboard_Press_Release_BVE(EB_SW, KEY_DELETE);  //Delete:0xD4
+  }
 }
 
 void read_B1() {
-
   static bool B1_Dengen = false;
   static bool B1_Dengen_latch = B1_Dengen;
-  bool B1_info = Ats_Conf_flip >> 3 & 1;
-  if (B1_info) {
+  if (atsConfFlag(ATSCONF_B1_FROM_POT)) {
     static uint8_t brk_angl_latch = brk_angl;
     //前回ブレーキ弁角度と今回ブレーキ弁角度がチャタリングフィルタ以上の場合
     if (abs(brk_angl - brk_angl_latch) >= set_ChatteringFilter || flg_set_BrakeNotchNum_changed) {
       flg_set_BrakeNotchNum_changed = false;
       if (set_BrakeNotchNum > 0) {
-        if (use_AutoAirBrake) {
+        if (use_AutoAirBrake()) {
           B1_Dengen = brk_angl <= set_BrakeSAPAngle;
         } else {
           B1_Dengen = brk_angl <= set_BrakeEBAngle;
@@ -1724,16 +1556,13 @@ void read_B1() {
       }
       brk_angl_latch = brk_angl;
     }
-  } else if (!B1_info) {
-    static uint8_t B1_In_Count_On = 0;
-    static uint8_t B1_In_Count_Off = 0;
-    In_and_Out(adcRead(3) < 5, B1_Dengen, 10, B1_In_Count_On, B1_In_Count_Off);
+  } else {
+    static DebounceCounter B1_cnt = { 0, 0 };
+    debounce(adcRead(ADC_CH_B1) < 5, B1_Dengen, B1_cnt, 10);
   }
 
   if (B1_Dengen_latch != B1_Dengen) {
-    tmp_ser1_s = "BDN ";
-    tmp_ser1_s += String(B1_Dengen & (set_BrakeNotchNum > 0), BIN);
-    Serial1Print(tmp_ser1_s, true);
+    Serial1PrintFlag("BDN", B1_Dengen && (set_BrakeNotchNum > 0), true);
     send_Serial1(strbve);
   }
   B1_Dengen_latch = B1_Dengen;
@@ -1742,165 +1571,155 @@ void read_B1() {
 void read_ModeN() {
   bool tmp_mode_n = !digitalRead(PIN_BVE_MODE);  //BVE模型切替SW BVE:1 模型:0
   static bool tmp_mode_n_latch = tmp_mode_n;
-  if (tmp_mode_n != tmp_mode_n_latch) {
+  if (changed(tmp_mode_n, tmp_mode_n_latch)) {
     modeN = !tmp_mode_n;
     modeBVE = tmp_mode_n;
     if (modeN) {
       modeN_set();
     }
-    tmp_mode_n_latch = tmp_mode_n;
   }
 }
 
-void string_Analysis() {
-  if (str != str_latch) {
-    uint8_t i = 0;
-    String s = "";
-    if (str.startsWith("WR ")) {
-      //設定モード
-      if (str.length() > 7) {
-        uint8_t device = str.substring(3, 6).toInt();
-        uint16_t num = str.substring(7, 12).toInt();
-        if (device <= 100) {
-          String ret = set_Settings(device, num);
-          Serial1Print(ret, true);
-        }
+// ================================================
+// 自動ブレーキ帯シミュレーション
+// ================================================
+
+void BP_ER_EB_Control(unsigned long &bp_millis, unsigned long &er_millis) {
+  //BPを急減圧
+  if ((millis() - bp_millis) > 20) {
+    if (BP_press > 0) {
+      BP_press -= 10;
+      if (BP_press < 10) {
+        BP_press = 0;
       }
     }
-
-    else if (str.startsWith("RD ")) {
-      if (str.length() > 5) {
-        uint8_t device = str.substring(3, 6).toInt();
-        if (device <= 100) {
-          uint16_t nnn = 0;
-          String ret = rw_eeprom(device, nnn, nnn, false, false);
-          Serial1Print(ret, true);
-        }
-      }
+    bp_millis = millis();
+  }
+  //ER圧を減圧
+  if ((millis() - er_millis) > bp_span) {
+    if (ER_press > 0) {
+      ER_press--;
     }
-
-    else if (str.startsWith("BC ")) {
-      if (use_AutoAirBrake && !mode_TS185) {
-        if (use_AAB_RealAir) {
-          BC_press = str.substring(3, 6).toInt();
-          if (Serial && Serial.availableForWrite() > 32) {
-            Serial.println(str);
-          }
-        }
-      }
-    }
-
-    //キーボードモード 4.2.1.6追加
-    else if (str.startsWith("KEY"))
-      KeyPut(str);
-
-    //PANモード 4.2.1.6追加
-    else if (str.startsWith("PAN")) {
-      if (str.length() > 4) Pan_Mode = str.charAt(4) == '1';
-    }
-
-    //事故モード 4.2.2.2追加 マスコンレバーサ無効
-    else if (str.startsWith("ACD")) {
-      if (str.length() > 4) Accident_Mode = str.charAt(4) == '1';
-    }
-
-    //圧力モニタ、交直切替4.2.3.0追加
-    else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
-      if (str.length() > 4) {
-        if (Serial && Serial.availableForWrite() > 32) {
-          Serial.println(str);
-        }
-      }
-    }
-
-    else if (str.startsWith("MD ")) {
-      //模型モード
-      if (str.indexOf("N   ") > 0) {
-        if (str.length() > 7) {
-          int16_t num = str.substring(7, 12).toInt();
-          s = "OK N   ";
-          if (num) {
-            modeN = true;
-            modeBVE = false;
-            modeN_set();
-            s += "ON";
-          } else {
-            modeN = false;
-            modeBVE = true;
-            s += "OFF";
-          }
-        }
-      }
-      //ポテンショ読取モード
-      else if (str.indexOf("POT ") > 0) {
-        if (str.length() > 7) {
-          int16_t num = str.substring(7, 12).toInt();
-          s = "OK POT ";
-          if (num) {
-            mode_POT = 1;
-            s += "ON";
-          } else {
-            mode_POT = 0;
-            s += "OFF";
-          }
-        }
-      } else {
-        s = "E0";
-      }
-      if (Serial && Serial.availableForWrite() > 32) {
-        Serial.println(s);
-      }
-
-    }
-    //通常モード：速度、戸閉、電流抽出
-    else {
-      if (str.length() > 11) {
-        strbve = str;
-        bve_speed = strbve.substring(0, 4).toInt();
-
-        //戸閉灯指示
-        bool doorClosed = (strbve.charAt(5) == '1');
-        digitalWrite(PIN_DOOR_OUT, !doorClosed);
-        digitalWrite(LED_BUILTIN, !doorClosed);
-
-        bve_current = strbve.substring(7, 12).toInt();
-
-        //自動ノッチ合わせ機構
-        AutoNotch(strbve);
-
-        //BC抽出
-        if (strbve.length() >= 67) {
-          bve_BC_press = strbve.substring(55, 58).toInt();
-          bve_SAP_press = strbve.substring(63, 66).toInt();
-          //非常ブレーキ抽出
-          EB_JR_move_E = strbve.substring(36, 37).toInt();
-        }
-      }
-    }
-
-    //速度計表示補正 調整時表示のためここ
-    disp_SpeedMeter(bve_speed);
-
-    //電流計
-    disp_CurrentMeter(bve_current);
-
-    //Serial1転送
-    send_Serial1(str);
-    str_latch = str;
+    er_millis = millis();
   }
 }
 
+//BP,ER圧のシミュレーション
+void simulateBpEr() {
+  //BPの増減圧インターバルを設定(重なり全開位置より手前は増圧、以降は減圧)
+  bp_span = (brk_angl < set_BrakeAutoAir1Angle) ? set_BrakeBPUpSpan : set_BrakeBPDownSpan;
+
+  static unsigned long bp_millis = 0;
+  static unsigned long er_millis = 0;
+  if (EB_JR_move_E) {
+    BP_ER_EB_Control(bp_millis, er_millis);
+    return;
+  }
+
+  //直通帯(運転位置)でBP,ERを加圧
+  if (brk_angl < set_BrakeSAPAngle) {
+    if ((millis() - bp_millis) > bp_span) {
+      if (BP_press < 490) {
+        BP_press++;
+      }
+      if (ER_press < 490) {
+        ER_press++;
+      }
+      bp_millis = millis();
+    }
+    //重なり位置でBP,ERは維持
+  } else if (brk_angl < set_BrakeAutoAir1Angle) {
+
+    //常用位置でBPとER圧を減圧
+  } else if (brk_angl < set_BrakeEBAngle) {
+    if ((millis() - bp_millis) > bp_span) {
+      if (BP_press > 0) {
+        BP_press--;
+      }
+      if (ER_press > 0) {
+        ER_press--;
+      }
+      bp_millis = millis();
+    }
+
+    //非常位置
+  } else {
+    BP_ER_EB_Control(bp_millis, er_millis);
+  }
+}
+
+//BC圧をBP圧より生成
+void calcBcFromBp() {
+  press_BC_Sim = (490 - BP_press) * 3.3;  //暫定
+  //非常吐出なく、自動帯常用でBC圧力が440kPa以上のとき440kPaとする
+  if (press_BC_Sim > 440) {
+    if (brk_angl < set_BrakeEBAngle && !EB_latch) {
+      press_BC_Sim = 440;
+    }
+  }
+  //非常動作時
+  if (press_BC_Sim > 490) {  //計算上のBC圧が490より上のとき
+    if (brk_angl >= set_BrakeEBAngle || EB_latch) {
+      press_BC_Sim = 490;
+    }
+  }
+}
+
+void BP_Sim() {
+  if (!use_AAB_RealAir) {
+    simulateBpEr();
+    calcBcFromBp();
+  } else {
+    press_BC_Sim = BC_press;
+  }
+
+  //自動帯使用時に圧力をノッチに変換(BveEXを使用しない場合)
+  //BveEX使用時、ノッチはB0固定
+  if (!use_BveEX()) {
+    //BC圧からブレーキノッチに変換
+    if (EB_latch) {
+      autoair_notch_brk = set_BrakeNotchNum + 1;
+    } else {
+      if (set_BrakeNotchNum > 0) {
+        autoair_notch_brk = map(press_BC_Sim, 0, 440, 0, set_BrakeNotchNum);
+      }
+    }
+  }
+
+  //自動帯圧力優先シーケンス
+  if (brk_angl <= set_Brake10DegAngl) {
+    //N位置: 自動ブレーキの段数を採用
+    notch_brk = autoair_notch_brk;
+    if (!use_BveEX()) {
+      strbve.setCharAt(MSG_LAMP_SAP, '0');  //直通ランプ消灯
+    }
+  } else if (brk_angl < set_BrakeSAPAngle) {
+    //直通帯位置: 自動ブレーキ帯の段数が高いとき
+    if (notch_brk < autoair_notch_brk) {
+      notch_brk = autoair_notch_brk;
+      if (!use_BveEX()) {
+        strbve.setCharAt(MSG_LAMP_SAP, '1');  //直通ランプ点灯
+      }
+    }
+  } else if (brk_angl < set_BrakeEBAngle && !use_BveEX()) {
+    //自動帯(BveEX非使用時のとき): 自動ブレーキ帯の段数が高いとき
+    if (notch_brk < autoair_notch_brk) {
+      notch_brk = autoair_notch_brk;
+    }
+  }
+}
+
+//圧力値が変動時、下位および上位に伝送
 void comm_Pressure() {
-  //圧力値が変動時、下位および上位に伝送
   static uint16_t BC_press_latch = BC_press;
   static uint16_t BP_press_latch = BP_press;
   static uint16_t ER_press_latch = ER_press;
   if (BC_press != BC_press_latch || BP_press != BP_press_latch || ER_press != ER_press_latch) {
     send_Serial1(strbve);
     //V4.2.1.1追加 実際のエアー圧を使用しない場合(TS185でなく、modeBVEのとき)はBCの変化時にPCへ伝送
-    if (use_AutoAirBrake && !use_AAB_RealAir && !mode_TS185 && modeBVE) {
+    if (use_AutoAirBrake() && !use_AAB_RealAir && !mode_TS185() && modeBVE) {
       if (BC_press != BC_press_latch) {
-        if (Serial && Serial.availableForWrite() > 32) {
+        if (usbWritable()) {
           Serial.print("BC ");
           Serial.println(BC_press);
         }
@@ -1910,4 +1729,283 @@ void comm_Pressure() {
     BP_press_latch = BP_press;
     ER_press_latch = ER_press;
   }
+}
+
+// ================================================
+// シリアル通信・電文処理
+// ================================================
+
+//直前の読み取りでCRの次にLFが続く場合(CRLF)、1文字読み飛ばす
+void skipLF(Stream &port) {
+  if (port.peek() == '\n') {
+    port.read();
+  }
+}
+
+void read_Serial1() {
+  if (Serial1.available() > 0) {
+    str = Serial1.readStringUntil('\r');
+    str.trim();
+    skipLF(Serial1);
+  }
+}
+
+void read_USB() {
+  if (Serial.available()) {
+    str = Serial.readStringUntil('\r');
+  }
+  str.trim();
+  skipLF(Serial);
+}
+
+//3桁の数値を電文の指定位置へ書き込む
+void setStringAt(uint8_t startIndex, String &str, uint16_t value) {
+  uint16_t d[3];
+  d[0] = value / 100 + 0x30;
+  d[1] = value / 10 % 10 + 0x30;
+  d[2] = value % 10 + 0x30;
+
+  if (str.length() >= MSG_MIN_LEN_PRESSURE) {
+    for (int i = 0; i < 3; i++) {
+      str.setCharAt(startIndex + i, char(d[i]));
+    }
+  }
+}
+
+//自動帯シミュレーション時、BC、BP、SAPの演算結果を電文へ反映する(直接転送モード以外)
+void applyAutoAirPressure(String &str) {
+  //"0000/1/ 00000/100000/0000000000000000000001/NN0B08M780C440E490S440P490/";
+  static bool sap_auto_mask = false;
+  BC_press = press_BC_Sim;  //BCの演算結果を代入
+
+  //現在BC圧よりもBVEからのBC圧が高い場合はBVEを優先し
+  //逆の場合で直通帯のときBVEの圧力を優先する
+  if (!sap_auto_mask && (bve_BC_press > BC_press || brk_angl < set_BrakeSAPAngle)) {
+    BC_press = bve_BC_press;
+  }
+
+  setStringAt(MSG_BC, str, BC_press);
+  setStringAt(MSG_BP, str, BP_press);
+  setStringAt(MSG_ER, str, ER_press);
+
+  //SAP
+  static uint16_t sap_press_latch = bve_SAP_press;
+  static unsigned long sap_millis = millis();  //※更新されないため、起動20ms後以降は常に条件成立(従来動作)
+  static bool sap_latch = false;
+  if (brk_angl <= set_BrakeSAPAngle) {
+    if (sap_latch && sap_press_latch <= 435) {
+      if ((bve_SAP_press - sap_press_latch) > 50) {
+        sap_press_latch += 5;
+      } else {
+        sap_latch = false;
+      }
+    }
+    if (!sap_latch) {
+      if (!sap_auto_mask) {
+        sap_press_latch = bve_SAP_press;
+      } else {
+        if (set_BrakeNotchNum > 0) {
+          uint16_t tmp_sap_press = map(sap_notch_brk, 0, set_BrakeNotchNum, 0, 440);
+          if (tmp_sap_press > bve_SAP_press) {
+            sap_auto_mask = false;
+          }
+        }
+      }
+    }
+  }
+  if (brk_angl > set_BrakeSAPAngle) {
+    sap_latch = true;
+    sap_auto_mask = true;
+    if (millis() - sap_millis > 20) {
+      if (sap_press_latch >= 5) {
+        sap_press_latch -= 5;
+      }
+      if (sap_press_latch < 5) {
+        sap_press_latch = 0;
+      }
+    }
+  }
+  setStringAt(MSG_SAP, str, sap_press_latch);
+}
+
+void send_Serial1(String &str) {
+  if (use_AutoAirBrake()) {
+    //自動帯有効で自動帯投入時、直通ランプと電制を無効とする
+    if (brk_angl > set_BrakeSAPAngle) {
+      if (str.length() > MSG_LAMP_DYN) {
+        if (!use_BveEX()) {
+          str.setCharAt(MSG_LAMP_SAP, '0');  //直通ランプ
+          str.setCharAt(MSG_LAMP_DYN, '0');  //電制ランプ
+        }
+      }
+    }
+    if (!use_AAB_RealAir && !use_AutoAirBrakeDirectSend()) {
+      applyAutoAirPressure(str);
+    }
+  }
+  //非常
+  if (transfer_EB_state && notch_brk == set_BrakeNotchNum + 1) {
+    str.setCharAt(MSG_EB, '1');
+  }
+
+  Serial1.print(str);
+  Serial1.print('\r');
+}
+
+//ノッチ自動調整 BVEからの入力に対して現在状態の比較を行い、ラッチに格納することでメインループで自動的に修正する
+void AutoNotch(String &str) {
+  if (str.length() > 49 && (Auto_Notch_Adjust == 1 || (Auto_Notch_Adjust == 2 && flgFirstSend)) && !autoair_dir_mask) {
+    if (str.charAt(MSG_NOTCH_MARK) == 'B') {
+      switch (str.charAt(MSG_DIR)) {
+        case 'F':
+          iDir_latch = 1;
+          break;
+        case 'B':
+          iDir_latch = -1;
+          break;
+        default:
+          iDir_latch = 0;
+      }
+      char Buf[4];
+      Buf[0] = str.charAt(MSG_NOTCH_BRK);
+      Buf[1] = str.charAt(MSG_NOTCH_BRK + 1);
+      Buf[2] = str.charAt(MSG_NOTCH_BRK + 2);
+      Buf[3] = '\0';
+      notch_brk_latch = strtol(Buf, NULL, 16);  //16進数→10進数に変換
+    }
+    flgFirstSend = false;
+  }
+}
+
+//"WR DDD NNNNN": 設定書込
+void cmdWrite(const String &str) {
+  if (str.length() > 7) {
+    uint8_t device = str.substring(3, 6).toInt();
+    uint16_t num = str.substring(7, 12).toInt();
+    if (device <= 100) {
+      Serial1Print(set_Settings(device, num), true);
+    } else if (device == 120) {
+      set_Settings(device, num);
+    }
+  }
+}
+
+//"RD DDD": 設定読出
+void cmdRead(const String &str) {
+  if (str.length() > 5) {
+    uint8_t device = str.substring(3, 6).toInt();
+    if (device <= 100) {
+      uint16_t value = 0;
+      Serial1Print(rw_eeprom(device, 0, value, false, false), true);
+    } 
+  }
+}
+
+//"MD ..."(模型モード/ポテンショ読取モード)
+void cmdMode(const String &str) {
+  String s = "";
+  if (str.indexOf("N   ") > 0) {
+    //模型モード
+    if (str.length() > 7) {
+      int16_t num = str.substring(7, 12).toInt();
+      s = "OK N   ";
+      if (num) {
+        modeN = true;
+        modeBVE = false;
+        modeN_set();
+        s += "ON";
+      } else {
+        modeN = false;
+        modeBVE = true;
+        s += "OFF";
+      }
+    }
+  } else if (str.indexOf("POT ") > 0) {
+    //ポテンショ読取モード
+    if (str.length() > 7) {
+      int16_t num = str.substring(7, 12).toInt();
+      s = "OK POT ";
+      if (num) {
+        mode_POT = true;
+        s += "ON";
+      } else {
+        mode_POT = false;
+        s += "OFF";
+      }
+    }
+  } else {
+    s = "E0";
+  }
+  if (usbWritable()) {
+    Serial.println(s);
+  }
+}
+
+//通常電文：速度、戸閉、電流、BC、SAP、非常を抽出
+void parseBveFrame(const String &str) {
+  if (str.length() > 11) {
+    strbve = str;
+    bve_speed = strbve.substring(MSG_SPEED, MSG_SPEED + 4).toInt();
+
+    //戸閉灯指示
+    bool doorClosed = (strbve.charAt(MSG_DOOR) == '1');
+    digitalWrite(PIN_DOOR_OUT, !doorClosed);
+    digitalWrite(LED_BUILTIN, !doorClosed);
+
+    bve_current = strbve.substring(MSG_CURRENT, MSG_CURRENT + 5).toInt();
+
+    //自動ノッチ合わせ機構
+    AutoNotch(strbve);
+
+    //BC抽出
+    if (strbve.length() >= MSG_MIN_LEN_PRESSURE) {
+      bve_BC_press = strbve.substring(MSG_BC, MSG_BC + 3).toInt();
+      bve_SAP_press = strbve.substring(MSG_SAP, MSG_SAP + 3).toInt();
+      //非常ブレーキ抽出
+      EB_JR_move_E = strbve.substring(MSG_EB, MSG_EB + 1).toInt();
+    }
+  }
+}
+
+//電文解析
+void string_Analysis() {
+  if (str == str_latch) return;
+
+  if (str.startsWith("WR ")) {
+    cmdWrite(str);  //設定モード
+  } else if (str.startsWith("RD ")) {
+    cmdRead(str);
+  } else if (str.startsWith("BC ")) {
+    if (use_AutoAirBrake() && !mode_TS185() && use_AAB_RealAir) {
+      BC_press = str.substring(3, 6).toInt();
+      if (usbWritable()) {
+        Serial.println(str);
+      }
+    }
+  } else if (str.startsWith("KEY")) {
+    KeyPut(str);  //キーボードモード 4.2.1.6追加
+  } else if (str.startsWith("PAN")) {
+    if (str.length() > 4) Pan_Mode = str.charAt(4) == '1';  //PANモード 4.2.1.6追加
+  } else if (str.startsWith("ACD")) {
+    if (str.length() > 4) Accident_Mode = str.charAt(4) == '1';  //事故モード 4.2.2.2追加 マスコンレバーサ無効
+  } else if (str.startsWith("FV") || str.startsWith("OK") || str.startsWith("E1") || str.startsWith("SW")) {
+    //圧力モニタ、交直切替4.2.3.0追加
+    if (str.length() > 4 && usbWritable()) {
+      Serial.println(str);
+    }
+  } else if (str.startsWith("MD ")) {
+    cmdMode(str);
+  } else {
+    parseBveFrame(str);
+  }
+
+  //速度計表示補正 調整時表示のためここ
+  disp_SpeedMeter(bve_speed);
+
+  //電流計
+  disp_CurrentMeter(bve_current);
+
+  //Serial1転送
+  send_Serial1(str);
+  str_latch = str;
 }
